@@ -183,8 +183,8 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON *calc_schema = cJSON_CreateObject();
     cJSON_AddItemToObject(calc_schema, "type", cJSON_CreateString("object"));
     cJSON *calc_props = cJSON_CreateObject();
-    cJSON *expr_prop = cJSON_CreateObject(); cJSON_AddItemToObject(expr_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(expr_prop, "description", cJSON_CreateString("REQUIRED: Math expression to evaluate (e.g., '2+2', 'sqrt(16)+cos(pi)', '(1+2)^3')")); cJSON_AddItemToObject(calc_props, "expression", expr_prop);
+    cJSON *calc_expr_prop = cJSON_CreateObject(); cJSON_AddItemToObject(calc_expr_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(calc_expr_prop, "description", cJSON_CreateString("REQUIRED: The mathematical expression to evaluate")); cJSON_AddItemToObject(calc_props, "expr", calc_expr_prop);
     cJSON_AddItemToObject(calc_schema, "properties", calc_props);
-    cJSON *calc_required = cJSON_CreateArray(); cJSON_AddItemToArray(calc_required, cJSON_CreateString("expression")); cJSON_AddItemToObject(calc_schema, "required", calc_required);
-    tool_register(reg, "Calc", "Calculate a mathematical expression and return the result. Supports arithmetic (+, -, *, /, %), power (^), implicit multiplication (2(3), pi(3)), parentheses, variables (pi, e, phi, tau, inf, nan), and functions.", calc_schema, tool_calc);
+    cJSON *calc_required = cJSON_CreateArray(); cJSON_AddItemToArray(calc_required, cJSON_CreateString("expr")); cJSON_AddItemToObject(calc_schema, "required", calc_required);
+    tool_register(reg, "Calc", "Calculate a mathematical expression and return the result. Supports arithmetic (+, -, *, /, %), power (^), implicit multiplication (2(3), pi(3)), parentheses, variables (pi, e, phi, tau), and functions. Trigonometric functions use RADIANS (sin(pi/2)=1, cos(pi)=-1, sin(0)=0). Supported functions: sqrt, cbrt, pow, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, log (base 2nd arg), ln, log2, log10, exp, abs, sign, floor, ceil, round, min, max, fact (factorial), deg (radians to degrees), rad (degrees to radians). Examples: 2+3*4, sin(pi/2), sqrt(16)+cos(pi), (1+2)^3, log(8,2), pi*2, deg(pi) (returns 180), rad(180) (returns pi)", calc_schema, tool_calc);
 }

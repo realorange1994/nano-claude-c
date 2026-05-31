@@ -10,6 +10,8 @@
 #include <time.h>
 #include <sys/time.h>
 #include <windows.h>
+#include <math.h>
+#include <stdint.h>
 
 static char *normalize_line_endings(const char *text);
 static char *restore_line_endings(const char *text, int use_crlf);
@@ -1327,15 +1329,24 @@ char *tool_exec(cJSON *input, char **error) {
 }
 
 char *tool_calc(cJSON *input, char **error) {
-    cJSON *expr = cJSON_GetObjectItem(input, "expression");
+    cJSON *expr = cJSON_GetObjectItem(input, "expr");
     
     if (!expr || !expr->valuestring) {
-        *error = strdup("missing expression parameter");
+        *error = strdup("missing expr parameter");
         return NULL;
     }
     
     double result = calc_evaluate(expr->valuestring, error);
     
+    if (isnan(result)) return strdup("NaN");
+    if (isinf(result)) return strdup(result > 0 ? "Infinity" : "-Infinity");
+    
+    // Format: integers without decimal, others with precision
+    if (result == (double)(int64_t)result) {
+        char *str = malloc(32);
+        if (str) snprintf(str, 32, "%.0f", result);
+        return str;
+    }
     return calc_format_result(result);
 }
 
