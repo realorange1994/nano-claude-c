@@ -404,8 +404,10 @@ static void repl_run_compaction(REPL *repl) {
         }
 
         // Remove orphaned tool results (like miniclaude's removeOrphanedToolResults)
+        // Use heap-allocated arrays to avoid stack overflow (MAX_MESSAGES is 1024)
         int valid_count = 0;
-        char valid_ids[MAX_MESSAGES][256];
+        char (*valid_ids)[256] = malloc(repl->history.count * sizeof(*valid_ids));
+        if (!valid_ids) { free(summary); return; }
         for (int i = 0; i < repl->history.count && valid_count < MAX_MESSAGES; i++) {
             if (repl->history.msgs[i].type == MSG_ASSISTANT && repl->history.msgs[i].tool_id) {
                 strncpy(valid_ids[valid_count], repl->history.msgs[i].tool_id, 255);
@@ -436,6 +438,7 @@ static void repl_run_compaction(REPL *repl) {
             new_count++;
         }
         repl->history.count = new_count;
+        free(valid_ids);
 
         free(repl->history.summary);
         repl->history.summary = summary;
