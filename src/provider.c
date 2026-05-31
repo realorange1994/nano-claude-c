@@ -191,15 +191,73 @@ static void stream_flush_tool(StreamContext *ctx) {
     fprintf(stderr, "[DEBUG] stream_flush_tool: name='%s' id='%s' input_len=%zu\n",
             ctx->current_tool_name, ctx->current_tool_id, ctx->tool_input_len);
 
-    // Validate JSON - if empty or invalid, use empty object
+    // Parse JSON tool input with recovery for incomplete/partial JSON
+    // (like miniclaude's parseAnthropicJSONArgs)
     char *input_json = NULL;
     if (ctx->tool_input_buf && ctx->tool_input_len > 0) {
+        // First try direct parse
         cJSON *parsed = cJSON_Parse(ctx->tool_input_buf);
         if (parsed) {
             input_json = cJSON_PrintUnformatted(parsed);
             cJSON_Delete(parsed);
         } else {
-            fprintf(stderr, "[DEBUG] tool input JSON parse failed, raw: %.200s\n", ctx->tool_input_buf);
+            // JSON parse failed - try to extract a valid JSON object
+            // by scanning for balanced braces (like extractJSONObject)
+            const char *s = ctx->tool_input_buf;
+            size_t s_len = ctx->tool_input_len;
+
+            // Find first '{' that starts a complete JSON object
+            for (size_t start = 0; start < s_len; start++) {
+                if (s[start] != '{') continue;
+
+                int depth = 0;
+                int in_string = 0;
+                int escaped = 0;
+
+                for (size_t i = start; i < s_len; i++) {
+                    unsigned char c = (unsigned char)s[i];
+
+                    if (escaped) {
+                        escaped = 0;
+                        continue;
+                    }
+                    if (c == '\\' && in_string) {
+                        escaped = 1;
+                        continue;
+                    }
+                    if (c == '"') {
+                        in_string = !in_string;
+                        continue;
+                    }
+                    if (in_string) continue;
+
+                    if (c == '{') depth++;
+                    else if (c == '}') {
+                        depth--;
+                        if (depth == 0) {
+                            // Found complete JSON object from start to i
+                            size_t json_len = i - start + 1;
+                            char *json_str = malloc(json_len + 1);
+                            memcpy(json_str, s + start, json_len);
+                            json_str[json_len] = '\0';
+
+                            parsed = cJSON_Parse(json_str);
+                            if (parsed) {
+                                input_json = cJSON_PrintUnformatted(parsed);
+                                cJSON_Delete(parsed);
+                                fprintf(stderr, "[DEBUG] recovered JSON from offset %zu, len=%zu\n", start, json_len);
+                            }
+                            free(json_str);
+                            goto done_json_recovery;
+                        }
+                    }
+                }
+            }
+
+done_json_recovery:
+            if (!input_json) {
+                fprintf(stderr, "[DEBUG] JSON recovery failed, raw: %.200s\n", ctx->tool_input_buf);
+            }
         }
     }
     if (!input_json) {
@@ -241,10 +299,9 @@ static void stream_handle_content_block_start(cJSON *block, StreamContext *ctx) 
     if (!type || !type->valuestring) return;
 
     if (strcmp(type->valuestring, "tool_use") == 0) {
-        // Start of a tool call - capture name, id, and full input
+        // Start of a tool call - capture name and id only
         cJSON *name = cJSON_GetObjectItem(block, "name");
         cJSON *id = cJSON_GetObjectItem(block, "id");
-        cJSON *input = cJSON_GetObjectItem(block, "input");
 
         if (name && name->valuestring) {
             strncpy(ctx->current_tool_name, name->valuestring, sizeof(ctx->current_tool_name) - 1);
@@ -253,18 +310,10 @@ static void stream_handle_content_block_start(cJSON *block, StreamContext *ctx) 
             strncpy(ctx->current_tool_id, id->valuestring, sizeof(ctx->current_tool_id) - 1);
         }
 
-        // Only use input from content_block_start if it's non-empty
-        // (Anthropic streaming typically sends {} here, with args via input_json_delta)
+        // Clear tool input buffer - only collect from input_json_delta deltas
+        // (like miniclaude's pendingToolArgs = nil pattern)
         ctx->tool_input_len = 0;
         if (ctx->tool_input_buf) ctx->tool_input_buf[0] = '\0';
-        if (input && input->child) {
-            char *input_json = cJSON_PrintUnformatted(input);
-            if (input_json) {
-                size_t len = strlen(input_json);
-                stream_context_append_tool_input(ctx, input_json, len);
-                free(input_json);
-            }
-        }
         ctx->in_tool_use = 1;
     }
 }

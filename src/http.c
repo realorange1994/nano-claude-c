@@ -245,17 +245,20 @@ bool http_post_stream(const char *url, const char *headers, const char *body,
 
     // SSE parsing: dispatch each data line directly (stripped of "data: " prefix)
     // Use shorter timeouts and check cancelled flag for Ctrl+C support
+    // Use a continuation buffer to handle SSE lines that span multiple chunks.
+    // This is critical for tool call input_json_delta which can be very large.
     char chunk[4096];
+    char *line_buf = NULL;
+    size_t line_buf_len = 0;
+    size_t line_buf_cap = 0;
     DWORD bytes_read;
 
     while (!cancelled || !*cancelled) {
-        // Use WinHttpQueryDataAvailable to check if there's data, with short timeout
         DWORD available = 0;
         if (!WinHttpQueryDataAvailable(hRequest, &available)) {
             break;
         }
         if (available == 0) {
-            // No more data - check if connection closed (after brief wait)
             Sleep(100);
             if (!WinHttpQueryDataAvailable(hRequest, &available) || available == 0) {
                 break;
@@ -274,28 +277,56 @@ bool http_post_stream(const char *url, const char *headers, const char *body,
         }
         chunk[bytes_read] = '\0';
 
-        char *ptr = chunk;
+        // Append new data to line buffer
+        size_t new_len = line_buf_len + bytes_read;
+        if (new_len > line_buf_cap) {
+            line_buf_cap = (new_len + 1) * 2;
+            char *new_buf = realloc(line_buf, line_buf_cap);
+            if (new_buf) {
+                line_buf = new_buf;
+            } else {
+                break;  // Out of memory
+            }
+        }
+        if (line_buf) {
+            memcpy(line_buf + line_buf_len, chunk, bytes_read + 1);
+        }
+        line_buf_len = new_len;
+
+        // Process complete lines from buffer
+        char *ptr = line_buf;
         char *line_end;
 
         while ((line_end = strchr(ptr, '\n')) != NULL) {
             *line_end = '\0';
-
-            char *line = ptr;
-            // Remove trailing CR
-            size_t line_len = strlen(line);
-            if (line_len > 0 && line[line_len - 1] == '\r') {
-                line[line_len - 1] = '\0';
+            size_t line_len = (size_t)(line_end - ptr);
+            if (line_len > 0 && ptr[line_len - 1] == '\r') {
+                line_len--;
+                ptr[line_len] = '\0';
             }
 
-            // Dispatch data lines directly
-            if (strncmp(line, "data: ", 6) == 0) {
-                callback(line + 6, userdata);
+            // Only dispatch data: lines
+            if (strncmp(ptr, "data: ", 6) == 0) {
+                callback(ptr + 6, userdata);
             }
-            // Skip event:, comment, and empty lines
+            // Skip event:, :, empty lines, etc.
 
             ptr = line_end + 1;
         }
+
+        // Shift remaining incomplete line to start of buffer
+        if (ptr > line_buf && ptr <= line_buf + line_buf_len) {
+            size_t remaining = line_buf_len - (ptr - line_buf);
+            memmove(line_buf, ptr, remaining + 1);
+            line_buf_len = remaining;
+        }
     }
+
+    // Flush any remaining data in line buffer
+    if (line_buf && line_buf_len > 0 && strncmp(line_buf, "data: ", 6) == 0) {
+        callback(line_buf + 6, userdata);
+    }
+    free(line_buf);
     WinHttpCloseHandle(hRequest);
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
