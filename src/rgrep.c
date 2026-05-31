@@ -201,6 +201,11 @@ static int should_search_file(const char *path, RGrepConfig *cfg) {
 
 // Compile regex pattern (simple regex support for common patterns)
 static int regex_matches(const char *text, const char *pattern, int case_sensitive) {
+    // Guard against empty inputs
+    if (!text || !pattern || !*text || !*pattern) return 0;
+    
+    size_t text_len = strlen(text);
+    
     // If no special regex chars, use simple strstr
     const char *p = pattern;
     int has_special = 0;
@@ -236,34 +241,30 @@ static int regex_matches(const char *text, const char *pattern, int case_sensiti
     }
     
     // Basic regex: . * ? ^ $ [abc] support
-    // Compile pattern to simple regex state machine
     size_t plen = strlen(pattern);
-    int *matched = malloc((strlen(text) + 1) * sizeof(int));
+    int *matched = malloc((text_len + 1) * sizeof(int));
     if (!matched) return 0;
     
-    for (size_t i = 0; i <= strlen(text); i++) matched[i] = 0;
+    for (size_t i = 0; i <= text_len; i++) matched[i] = 0;
     matched[0] = 1;
     
     size_t pi = 0;
-    int group_start = -1;
     
     while (pi < plen) {
         char c = pattern[pi];
-        int next_is_literal = 0;
         
         // Handle escape sequences
         if (c == '\\' && pi + 1 < plen) {
             c = pattern[pi + 1];
-            next_is_literal = 1;
             pi++;
         }
         
         // Reset matched array for next position
-        for (size_t i = 1; i <= strlen(text); i++) matched[i] = 0;
+        for (size_t i = 1; i <= text_len; i++) matched[i] = 0;
         
         switch (c) {
             case '^':
-                // Start of line anchor - matched[0] stays true, others false
+                // Start of line anchor
                 break;
                 
             case '$':
@@ -272,22 +273,15 @@ static int regex_matches(const char *text, const char *pattern, int case_sensiti
                 
             case '.':
                 // Any character
-                for (size_t i = 0; i < strlen(text); i++) {
+                for (size_t i = 0; i < text_len; i++) {
                     matched[i] = matched[i] || matched[i + 1];
                 }
                 break;
                 
             case '*':
-                // Zero or more of previous
-                // Already handled in next iteration
-                break;
-                
             case '+':
-                // One or more of previous
-                break;
-                
             case '?':
-                // Zero or one of previous
+                // Handled in next iteration
                 break;
                 
             case '[': {
@@ -302,7 +296,7 @@ static int regex_matches(const char *text, const char *pattern, int case_sensiti
                 size_t end = pi;
                 while (end < plen && pattern[end] != ']') end++;
                 
-                for (size_t i = 0; i < strlen(text); i++) {
+                for (size_t i = 0; i < text_len; i++) {
                     int in_class = 0;
                     for (size_t j = pi; j < end; j++) {
                         char cc = pattern[j];
@@ -311,7 +305,8 @@ static int regex_matches(const char *text, const char *pattern, int case_sensiti
                             char start = pattern[j];
                             char endc = pattern[j + 2];
                             if (case_sensitive) {
-                                if (text[i] >= start && text[i] <= endc) in_class = 1;
+                                if ((unsigned char)text[i] >= (unsigned char)start && 
+                                    (unsigned char)text[i] <= (unsigned char)endc) in_class = 1;
                             } else {
                                 if (tolower((unsigned char)text[i]) >= tolower((unsigned char)start) &&
                                     tolower((unsigned char)text[i]) <= tolower((unsigned char)endc)) {
@@ -321,7 +316,7 @@ static int regex_matches(const char *text, const char *pattern, int case_sensiti
                             j += 2;
                         } else {
                             if (case_sensitive) {
-                                if (text[i] == cc) in_class = 1;
+                                if ((unsigned char)text[i] == (unsigned char)cc) in_class = 1;
                             } else {
                                 if (tolower((unsigned char)text[i]) == tolower((unsigned char)cc)) {
                                     in_class = 1;
@@ -338,22 +333,16 @@ static int regex_matches(const char *text, const char *pattern, int case_sensiti
             }
             
             case '(':
-                group_start = pi;
-                break;
-                
             case ')':
-                group_start = -1;
-                break;
-                
             case '|':
-                // Alternation - reset and try from start
+                // Grouping not fully supported
                 break;
-                
+            
             default:
                 // Literal character
-                for (size_t i = 0; i < strlen(text); i++) {
+                for (size_t i = 0; i < text_len; i++) {
                     if (case_sensitive) {
-                        if (text[i] == c) matched[i] = matched[i] || matched[i + 1];
+                        if ((unsigned char)text[i] == (unsigned char)c) matched[i] = matched[i] || matched[i + 1];
                     } else {
                         if (tolower((unsigned char)text[i]) == tolower((unsigned char)c)) {
                             matched[i] = matched[i] || matched[i + 1];
@@ -374,7 +363,7 @@ static int regex_matches(const char *text, const char *pattern, int case_sensiti
     
     // Check if any position is matched
     int result = 0;
-    for (size_t i = 0; i <= strlen(text); i++) {
+    for (size_t i = 0; i <= text_len; i++) {
         if (matched[i]) {
             result = 1;
             break;
