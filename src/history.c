@@ -186,7 +186,23 @@ cJSON *history_to_messages(History *h) {
 
 static int estimate_string_tokens(const char *str) {
     if (!str) return 0;
-    return (int)(strlen(str) / 4);
+    // Count Unicode characters instead of raw bytes
+    // UTF-8: ASCII=1 byte, Chinese=3 bytes per char
+    int chars = 0;
+    const unsigned char *p = (const unsigned char *)str;
+    while (*p) {
+        if (*p < 0x80) {
+            // ASCII
+            chars++;
+        } else if (*p >= 0xC0) {
+            // Multi-byte UTF-8 start
+            if (*p >= 0xF0) chars += 4;      // 4-byte: 11110xxx
+            else if (*p >= 0xE0) chars += 3; // 3-byte: 1110xxxx (Chinese)
+            else chars += 2;                  // 2-byte: 110xxxxx
+        }
+        p++;
+    }
+    return chars;
 }
 
 int history_estimate_tokens(History *h) {

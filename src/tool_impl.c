@@ -376,9 +376,10 @@ char *tool_exec(cJSON *input, char **error) {
         return NULL;
     }
 
-    // Build command line: "bash" -c 'escaped_command'
+    // Build command line: "bash" -c 'chcp 65001 > NUL && command'
+    // chcp 65001 sets UTF-8 code page for proper Chinese output
     char cmd_line[8192];
-    snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c '%s'", bash_exe, escaped);
+    snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c 'chcp 65001 > NUL && %s'", bash_exe, escaped);
     free(escaped);
 
     // Use CreateProcess with CREATE_NEW_PROCESS_GROUP so Ctrl+C is NOT sent to bash.
