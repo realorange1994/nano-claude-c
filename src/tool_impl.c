@@ -261,6 +261,10 @@ static FILE *utf8_fopen(const char *path, const char *mode) {
 // Built-in tool implementations
 // Max output size for Read tool (50KB)
 #define MAX_READ_OUTPUT 51200
+// Max lines to read
+#define MAX_READ_LINES 1000
+// Max line length
+#define MAX_LINE_LENGTH 2000
 
 // Helper: split text into lines (returns NULL-terminated array)
 static char **split_text_lines(const char *text, int *count) {
@@ -270,7 +274,7 @@ static char **split_text_lines(const char *text, int *count) {
     if (!lines) return NULL;
     int n = 0;
     const char *start = text;
-    while (*text) {
+    while (*text && n < MAX_READ_LINES) {
         if (*text == '\n') {
             if (n >= cap - 1) {
                 cap *= 2;
@@ -279,6 +283,8 @@ static char **split_text_lines(const char *text, int *count) {
                 lines = tmp;
             }
             size_t len = text - start;
+            // Truncate very long lines
+            if (len > MAX_LINE_LENGTH) len = MAX_LINE_LENGTH;
             lines[n] = malloc(len + 1);
             if (!lines[n]) { for (int i = 0; i < n; i++) free(lines[i]); free(lines); return NULL; }
             memcpy(lines[n], start, len);
@@ -289,15 +295,19 @@ static char **split_text_lines(const char *text, int *count) {
         text++;
     }
     // Last line (no trailing newline)
-    if (*start) {
+    if (*start && n < MAX_READ_LINES) {
         if (n >= cap - 1) {
             cap *= 2;
             char **tmp = realloc(lines, cap * sizeof(char*));
             if (!tmp) { for (int i = 0; i < n; i++) free(lines[i]); free(lines); return NULL; }
             lines = tmp;
         }
-        lines[n] = strdup(start);
+        size_t len = strlen(start);
+        if (len > MAX_LINE_LENGTH) len = MAX_LINE_LENGTH;
+        lines[n] = malloc(len + 1);
         if (!lines[n]) { for (int i = 0; i < n; i++) free(lines[i]); free(lines); return NULL; }
+        memcpy(lines[n], start, len);
+        lines[n][len] = '\0';
         n++;
     }
     *count = n;
@@ -338,9 +348,17 @@ char *tool_read_file(cJSON *input, char **error) {
         return NULL;
     }
     
+    // Get file size with limit check
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
+    
+    // Limit file size to 10MB
+    if (size <= 0 || size > 10 * 1024 * 1024) {
+        fclose(f);
+        *error = strdup("file too large or empty");
+        return NULL;
+    }
     
     char *file_content = malloc(size + 1);
     if (!file_content) {
