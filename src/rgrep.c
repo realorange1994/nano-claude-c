@@ -82,13 +82,12 @@ static int type_matches(const char *path, const char *type) {
     else filename++;
     
     size_t path_len = strlen(path);
-    size_t filename_len = strlen(filename);
     
     for (int i = 0; g_file_types[i][0]; i++) {
         if (strcmp(g_file_types[i][0], type) == 0) {
             const char *ext = g_file_types[i][1];
             // Check if it's a full filename (like Makefile, Dockerfile)
-            if (ext[0] && isupper(ext[0])) {
+            if (ext[0] && isupper((unsigned char)ext[0])) {
                 if (strcmp(filename, ext) == 0) {
                     return 1;
                 }
@@ -149,6 +148,14 @@ static int glob_matches(const char *filename, const char *glob) {
     while (*g == '*') g++;
     
     return (*g == *f);
+}
+
+// Max output size for grep (500KB)
+#define MAX_GREP_OUTPUT (500 * 1024)
+
+// Check if output buffer is full
+static int is_output_full(RGrepResult *result) {
+    return result->buf.len >= MAX_GREP_OUTPUT;
 }
 
 // Check if file should be searched based on filters
@@ -380,6 +387,9 @@ static int regex_matches(const char *text, const char *pattern, int case_sensiti
 
 // Search a single file
 static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *result) {
+    // Check if output is already full
+    if (is_output_full(result)) return;
+    
     FILE *f = fopen(filepath, "r");
     if (!f) return;
     
@@ -388,6 +398,9 @@ static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *res
     int file_matches = 0;
     
     while (fgets(line, sizeof(line), f)) {
+        // Check if output is full before processing
+        if (is_output_full(result)) break;
+        
         line_num++;
         
         // Truncate line if too long
@@ -397,11 +410,8 @@ static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *res
         
         // Remove trailing newline for matching
         size_t line_len = strlen(line);
-        int has_newline = 0;
         if (line_len > 0 && line[line_len - 1] == '\n') {
-            has_newline = 1;
             line[line_len - 1] = '\0';
-            line_len--;
         }
         
         // Check for match
@@ -413,16 +423,20 @@ static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *res
                 break;
             }
             
+            // Check output buffer size before appending
+            if (is_output_full(result)) {
+                fclose(f);
+                return;
+            }
+            
             // Format based on output mode
             switch (cfg->output_mode) {
                 case OUTPUT_FILES:
-                    // Just add filepath
                     buffer_append_str(&result->buf, filepath);
                     buffer_append_str(&result->buf, "\n");
                     break;
                     
                 case OUTPUT_COUNT:
-                    // File:count format
                     buffer_append_str(&result->buf, filepath);
                     buffer_append_str(&result->buf, ":");
                     {
@@ -434,7 +448,6 @@ static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *res
                     
                 case OUTPUT_CONTENT:
                 default:
-                    // path:line:content format
                     buffer_append_str(&result->buf, filepath);
                     buffer_append_str(&result->buf, ":");
                     {
@@ -443,13 +456,17 @@ static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *res
                         buffer_append_str(&result->buf, num);
                     }
                     buffer_append_str(&result->buf, line);
-                    if (has_newline) buffer_append_str(&result->buf, "\n");
-                    else buffer_append_str(&result->buf, "\n");
+                    buffer_append_str(&result->buf, "\n");
                     break;
             }
             
             result->total_matches++;
             result->files_matched++;
+        }
+        
+        // Check max results limit
+        if (cfg->max_results > 0 && result->total_matches >= cfg->max_results) {
+            break;
         }
     }
     
@@ -458,6 +475,9 @@ static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *res
 
 // Walk directory recursively
 static void walk_directory(const char *dir, RGrepConfig *cfg, RGrepResult *result) {
+    // Check if output is already full
+    if (is_output_full(result)) return;
+    
     char search_path[MAX_PATH];
     snprintf(search_path, sizeof(search_path), "%s\\*", dir);
     
@@ -472,6 +492,9 @@ static void walk_directory(const char *dir, RGrepConfig *cfg, RGrepResult *resul
             continue;
         }
         
+        // Check if output is full
+        if (is_output_full(result)) break;
+        
         // Build full path
         char full_path[MAX_PATH];
         snprintf(full_path, sizeof(full_path), "%s\\%s", dir, fd.cFileName);
@@ -483,16 +506,10 @@ static void walk_directory(const char *dir, RGrepConfig *cfg, RGrepResult *resul
             // Check file filters
             if (should_search_file(full_path, cfg)) {
                 result->files_scanned++;
-                
-                // Check max results
-                if (cfg->max_results > 0 && result->total_matches >= cfg->max_results) {
-                    break;
-                }
-                
                 search_file(full_path, cfg, result);
             }
         }
-    } while (FindNextFileA(h, &fd) && (cfg->max_results == 0 || result->total_matches < cfg->max_results));
+    } while (FindNextFileA(h, &fd) && !is_output_full(result));
     
     FindClose(h);
 }
