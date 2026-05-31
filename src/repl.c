@@ -934,7 +934,7 @@ static void print_tool_action(const char *name, cJSON *input) {
 
     if (strcmp(name, "Shell") == 0) {
 
-        printf("Running: %.120s", cjson_get_str(input, "command"));
+        printf("Running: %s", cjson_get_str(input, "command"));
 
     } else if (strcmp(name, "Read") == 0) {
 
@@ -942,7 +942,7 @@ static void print_tool_action(const char *name, cJSON *input) {
 
         const char *offset = cjson_get_str(input, "offset");
 
-        if (offset[0] && offset[0] != '0')
+        if (offset && offset[0] && offset[0] != '0')
 
             printf("Reading: %s (line %s)", path, offset);
 
@@ -964,7 +964,7 @@ static void print_tool_action(const char *name, cJSON *input) {
 
         const char *path = cjson_get_str(input, "path");
 
-        if (path[0])
+        if (path && path[0])
 
             printf("Searching \"%.60s\" in %s", pattern, path);
 
@@ -978,7 +978,7 @@ static void print_tool_action(const char *name, cJSON *input) {
 
     } else if (strcmp(name, "Calc") == 0) {
 
-        printf("Calculating: %.80s", cjson_get_str(input, "expr"));
+        printf("Calculating: %s", cjson_get_str(input, "expr"));
 
     } else {
 

@@ -24,7 +24,7 @@ static sig_handler_t g_old_sigill = NULL;
 static sig_handler_t g_old_sigint = NULL;
 
 // Simple file-based debug logging
-static void debug_log(const char *msg) {
+static void debug_log_disabled(const char *msg) {
     FILE *f = fopen("E:\\\\Git\\\\nanoclaude-c\\\\debug.log", "a");
     if (f) {
         fprintf(f, "%s\n", msg);
@@ -114,7 +114,7 @@ static DWORD tool_get_tick_count(void) {
 char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **error) {
     char dbg[256];
     snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: starting '%s'", name ? name : "(null)");
-    debug_log(dbg);
+    /* debug_log disabled */;
     
     if (!reg || !name) {
         if (error) *error = strdup("invalid arguments");
@@ -150,18 +150,18 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
     _begin_crash_protection();
     
     snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: calling '%s'", name);
-    debug_log(dbg);
+    /* debug_log disabled */;
     
     // Execute tool
     char *result = tool->func(args, error);
     
     snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: '%s' returned", name);
-    debug_log(dbg);
+    /* debug_log disabled */;
     
     // Check if tool crashed
     if (g_crashed) {
         snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: '%s' CRASHED!", name);
-        debug_log(dbg);
+        /* debug_log disabled */;
         if (result) { free(result); result = NULL; }
         if (error && !*error) {
             *error = strdup("tool crashed and was recovered");
@@ -177,7 +177,7 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
     if (created_args) cJSON_Delete(args);
     
     snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: '%s' done", name);
-    debug_log(dbg);
+    /* debug_log disabled */;
     
     // Check timeout
     DWORD elapsed = tool_get_tick_count() - start_tick;
