@@ -141,7 +141,9 @@ typedef struct {
     // Tool call state
     char current_tool_name[256];
     char current_tool_id[256];
-    char current_tool_input[8192];
+    char *tool_input_buf;      // Dynamically allocated tool input buffer
+    size_t tool_input_len;     // Current length of tool input
+    size_t tool_input_cap;     // Capacity of tool input buffer
     int in_tool_use;
     // Accumulated assistant text (for saving to history)
     char *text_buf;
@@ -166,21 +168,38 @@ static void stream_context_append_text(StreamContext *ctx, const char *text) {
 
 static void stream_context_free(StreamContext *ctx) {
     free(ctx->text_buf);
+    free(ctx->tool_input_buf);
+}
+
+static void stream_context_append_tool_input(StreamContext *ctx, const char *data, size_t data_len) {
+    size_t needed = ctx->tool_input_len + data_len + 1;
+    if (needed > ctx->tool_input_cap) {
+        ctx->tool_input_cap = needed * 2;
+        char *new_buf = realloc(ctx->tool_input_buf, ctx->tool_input_cap);
+        if (new_buf) ctx->tool_input_buf = new_buf;
+    }
+    if (ctx->tool_input_buf && ctx->tool_input_cap > ctx->tool_input_len + data_len) {
+        memcpy(ctx->tool_input_buf + ctx->tool_input_len, data, data_len);
+        ctx->tool_input_len += data_len;
+        ctx->tool_input_buf[ctx->tool_input_len] = '\0';
+    }
 }
 
 static void stream_flush_tool(StreamContext *ctx) {
     if (!ctx->in_tool_use) return;
 
-    fprintf(stderr, "[DEBUG] stream_flush_tool: name='%s' id='%s' input='%s'\n",
-            ctx->current_tool_name, ctx->current_tool_id, ctx->current_tool_input);
+    fprintf(stderr, "[DEBUG] stream_flush_tool: name='%s' id='%s' input_len=%zu\n",
+            ctx->current_tool_name, ctx->current_tool_id, ctx->tool_input_len);
 
     // Validate JSON - if empty or invalid, use empty object
     char *input_json = NULL;
-    if (ctx->current_tool_input[0] != '\0') {
-        cJSON *parsed = cJSON_Parse(ctx->current_tool_input);
+    if (ctx->tool_input_buf && ctx->tool_input_len > 0) {
+        cJSON *parsed = cJSON_Parse(ctx->tool_input_buf);
         if (parsed) {
             input_json = cJSON_PrintUnformatted(parsed);
             cJSON_Delete(parsed);
+        } else {
+            fprintf(stderr, "[DEBUG] tool input JSON parse failed, raw: %.200s\n", ctx->tool_input_buf);
         }
     }
     if (!input_json) {
@@ -192,14 +211,15 @@ static void stream_flush_tool(StreamContext *ctx) {
     chunk.tool_name = ctx->current_tool_name;
     chunk.tool_id = ctx->current_tool_id;
     chunk.tool_input = input_json;
-    fprintf(stderr, "[DEBUG] flushing tool call: name='%s' input='%s'\n", ctx->current_tool_name, input_json);
+    fprintf(stderr, "[DEBUG] flushing tool call: name='%s' input_len=%zu\n", ctx->current_tool_name, strlen(input_json));
     ctx->callback(&chunk, ctx->userdata);
     free(input_json);
 
     // Clear tool state
     ctx->current_tool_name[0] = '\0';
     ctx->current_tool_id[0] = '\0';
-    ctx->current_tool_input[0] = '\0';
+    ctx->tool_input_len = 0;
+    if (ctx->tool_input_buf) ctx->tool_input_buf[0] = '\0';
     ctx->in_tool_use = 0;
 }
 
@@ -235,11 +255,13 @@ static void stream_handle_content_block_start(cJSON *block, StreamContext *ctx) 
 
         // Only use input from content_block_start if it's non-empty
         // (Anthropic streaming typically sends {} here, with args via input_json_delta)
-        ctx->current_tool_input[0] = '\0';
+        ctx->tool_input_len = 0;
+        if (ctx->tool_input_buf) ctx->tool_input_buf[0] = '\0';
         if (input && input->child) {
             char *input_json = cJSON_PrintUnformatted(input);
             if (input_json) {
-                strncpy(ctx->current_tool_input, input_json, sizeof(ctx->current_tool_input) - 1);
+                size_t len = strlen(input_json);
+                stream_context_append_tool_input(ctx, input_json, len);
                 free(input_json);
             }
         }
@@ -250,7 +272,7 @@ static void stream_handle_content_block_start(cJSON *block, StreamContext *ctx) 
 static void stream_handle_content_block_delta(cJSON *delta, StreamContext *ctx) {
     cJSON *type = cJSON_GetObjectItem(delta, "type");
     if (!type || !type->valuestring) return;
-    
+
     if (strcmp(type->valuestring, "text_delta") == 0) {
         stream_handle_text_delta(delta, ctx);
     } else if (strcmp(type->valuestring, "input_json_delta") == 0) {
@@ -258,9 +280,8 @@ static void stream_handle_content_block_delta(cJSON *delta, StreamContext *ctx) 
         if (ctx->in_tool_use) {
             cJSON *partial = cJSON_GetObjectItem(delta, "partial_json");
             if (partial && partial->valuestring) {
-                size_t len = strlen(ctx->current_tool_input);
-                strncpy(ctx->current_tool_input + len, partial->valuestring, 
-                        sizeof(ctx->current_tool_input) - len - 1);
+                size_t len = strlen(partial->valuestring);
+                stream_context_append_tool_input(ctx, partial->valuestring, len);
             }
         }
     }
@@ -422,7 +443,9 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
     ctx.userdata = userdata;
     ctx.current_tool_name[0] = '\0';
     ctx.current_tool_id[0] = '\0';
-    ctx.current_tool_input[0] = '\0';
+    ctx.tool_input_buf = NULL;
+    ctx.tool_input_len = 0;
+    ctx.tool_input_cap = 0;
     ctx.in_tool_use = 0;
     ctx.text_buf = NULL;
     ctx.text_len = 0;
