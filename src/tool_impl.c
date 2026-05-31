@@ -226,9 +226,6 @@ static char *strip_ansi_codes(const char *input) {
     
     return result;
 }
-#include <math.h>
-#include <windows.h>
-#include <io.h>
 
 // UTF-8 to wide string converter for file paths
 static wchar_t *utf8_to_wide(const char *utf8) {
@@ -236,6 +233,7 @@ static wchar_t *utf8_to_wide(const char *utf8) {
     int size = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
     if (size <= 0) return NULL;
     wchar_t *result = malloc(size * sizeof(wchar_t));
+    if (!result) return NULL;  // Guard against malloc failure
     MultiByteToWideChar(CP_UTF8, 0, utf8, -1, result, size);
     return result;
 }
