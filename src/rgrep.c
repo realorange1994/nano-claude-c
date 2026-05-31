@@ -199,179 +199,31 @@ static int should_search_file(const char *path, RGrepConfig *cfg) {
     return 1;
 }
 
-// Compile regex pattern (simple regex support for common patterns)
+
+// Simple substring match (no regex support for safety)
 static int regex_matches(const char *text, const char *pattern, int case_sensitive) {
-    // Guard against empty inputs
-    if (!text || !pattern || !*text || !*pattern) return 0;
+    if (!text || !pattern || !text[0] || !pattern[0]) return 0;
     
-    size_t text_len = strlen(text);
-    
-    // If no special regex chars, use simple strstr
-    const char *p = pattern;
-    int has_special = 0;
-    while (*p) {
-        if (*p == '.' || *p == '*' || *p == '+' || *p == '?' || 
-            *p == '[' || *p == '(' || *p == '|' || *p == '^' || *p == '$') {
-            has_special = 1;
-            break;
-        }
-        p++;
-    }
-    
-    if (!has_special) {
-        // Simple substring match
-        if (case_sensitive) {
-            return strstr(text, pattern) != NULL;
-        } else {
-            // Case-insensitive
-            const char *t = text;
-            while (*t) {
-                const char *p1 = pattern;
-                const char *t1 = t;
-                while (*p1 && *t1 && 
-                       tolower((unsigned char)*p1) == tolower((unsigned char)*t1)) {
-                    p1++;
-                    t1++;
+    if (case_sensitive) {
+        return strstr(text, pattern) != NULL;
+    } else {
+        // Case-insensitive search
+        size_t pattern_len = strlen(pattern);
+        size_t text_len = strlen(text);
+        if (pattern_len > text_len) return 0;
+        
+        for (size_t i = 0; i <= text_len - pattern_len; i++) {
+            int match = 1;
+            for (size_t j = 0; j < pattern_len; j++) {
+                if (tolower((unsigned char)text[i + j]) != tolower((unsigned char)pattern[j])) {
+                    match = 0;
+                    break;
                 }
-                if (*p1 == '\0') return 1;
-                t++;
             }
-            return 0;
+            if (match) return 1;
         }
+        return 0;
     }
-    
-    // Basic regex: . * ? ^ $ [abc] support
-    size_t plen = strlen(pattern);
-    int *matched = malloc((text_len + 1) * sizeof(int));
-    if (!matched) return 0;
-    
-    for (size_t i = 0; i <= text_len; i++) matched[i] = 0;
-    matched[0] = 1;
-    
-    size_t pi = 0;
-    
-    while (pi < plen) {
-        char c = pattern[pi];
-        
-        // Handle escape sequences
-        if (c == '\\' && pi + 1 < plen) {
-            c = pattern[pi + 1];
-            pi++;
-        }
-        
-        // Reset matched array for next position
-        for (size_t i = 1; i <= text_len; i++) matched[i] = 0;
-        
-        switch (c) {
-            case '^':
-                // Start of line anchor
-                break;
-                
-            case '$':
-                // End of line anchor
-                break;
-                
-            case '.':
-                // Any character
-                for (size_t i = 0; i < text_len; i++) {
-                    matched[i] = matched[i] || matched[i + 1];
-                }
-                break;
-                
-            case '*':
-            case '+':
-            case '?':
-                // Handled in next iteration
-                break;
-                
-            case '[': {
-                // Character class
-                int negated = 0;
-                pi++;
-                if (pattern[pi] == '^') {
-                    negated = 1;
-                    pi++;
-                }
-                // Find closing bracket
-                size_t end = pi;
-                while (end < plen && pattern[end] != ']') end++;
-                
-                for (size_t i = 0; i < text_len; i++) {
-                    int in_class = 0;
-                    for (size_t j = pi; j < end; j++) {
-                        char cc = pattern[j];
-                        if (pattern[j + 1] == '-' && j + 2 < end) {
-                            // Range
-                            char start = pattern[j];
-                            char endc = pattern[j + 2];
-                            if (case_sensitive) {
-                                if ((unsigned char)text[i] >= (unsigned char)start && 
-                                    (unsigned char)text[i] <= (unsigned char)endc) in_class = 1;
-                            } else {
-                                if (tolower((unsigned char)text[i]) >= tolower((unsigned char)start) &&
-                                    tolower((unsigned char)text[i]) <= tolower((unsigned char)endc)) {
-                                    in_class = 1;
-                                }
-                            }
-                            j += 2;
-                        } else {
-                            if (case_sensitive) {
-                                if ((unsigned char)text[i] == (unsigned char)cc) in_class = 1;
-                            } else {
-                                if (tolower((unsigned char)text[i]) == tolower((unsigned char)cc)) {
-                                    in_class = 1;
-                                }
-                            }
-                        }
-                    }
-                    if (negated ? !in_class : in_class) {
-                        matched[i] = matched[i] || matched[i + 1];
-                    }
-                }
-                pi = end;
-                break;
-            }
-            
-            case '(':
-            case ')':
-            case '|':
-                // Grouping not fully supported
-                break;
-            
-            default:
-                // Literal character
-                for (size_t i = 0; i < text_len; i++) {
-                    if (case_sensitive) {
-                        if ((unsigned char)text[i] == (unsigned char)c) matched[i] = matched[i] || matched[i + 1];
-                    } else {
-                        if (tolower((unsigned char)text[i]) == tolower((unsigned char)c)) {
-                            matched[i] = matched[i] || matched[i + 1];
-                        }
-                    }
-                }
-                break;
-        }
-        
-        // Handle * after character
-        if (pi + 1 < plen && pattern[pi + 1] == '*') {
-            // Zero or more - already handled by loop
-            pi++;
-        }
-        
-        pi++;
-    }
-    
-    // Check if any position is matched
-    int result = 0;
-    for (size_t i = 0; i <= text_len; i++) {
-        if (matched[i]) {
-            result = 1;
-            break;
-        }
-    }
-    
-    free(matched);
-    return result;
 }
 
 // Search a single file
