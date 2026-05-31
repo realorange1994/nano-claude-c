@@ -20,20 +20,6 @@ static int next_id(MCPClient *mcp) {
     return mcp->next_id++;
 }
 
-static cJSON *create_string_item(const char *string) {
-    cJSON *item = cJSON_CreateString(string);
-    return item;
-}
-
-static cJSON *create_number_item(double num) {
-    cJSON *item = cJSON_CreateNumber(num);
-    return item;
-}
-
-static cJSON *create_object_item(void) {
-    return cJSON_CreateObject();
-}
-
 static char *send_request(MCPClient *mcp, cJSON *request) {
     char *json_str = cJSON_Print(request);
     if (!json_str) return NULL;

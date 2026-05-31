@@ -99,38 +99,53 @@ char *provider_chat_sync(Provider *p, cJSON *messages) {
     
     char *response = http_post(url, headers, json_body, 120000);
     free(json_body);
-    
+    fprintf(stderr, "[DEBUG] provider_chat_sync: http_post returned, response=%s\n", response ? "non-null" : "NULL");
+
     if (!response) return NULL;
-    
+
+    fprintf(stderr, "[DEBUG] provider_chat_sync: about to parse JSON: %.50s\n", response);
     cJSON *json = cJSON_Parse(response);
+    fprintf(stderr, "[DEBUG] provider_chat_sync: cJSON_Parse result: %p\n", (void*)json);
     free(response);
     
-    if (!json) return NULL;
-    
+    if (!json) {
+        fprintf(stderr, "[DEBUG] provider_chat_sync: JSON parse failed\n");
+        return NULL;
+    }
+
     char *content = NULL;
-    
+
     if (p->type == PROVIDER_ANTHROPIC) {
         cJSON *content_arr = cJSON_GetObjectItem(json, "content");
+        fprintf(stderr, "[DEBUG] provider_chat_sync: content_arr = %p\n", (void*)content_arr);
         if (content_arr && cJSON_GetArraySize(content_arr) > 0) {
             cJSON *item = cJSON_GetArrayItem(content_arr, 0);
-            cJSON *text = cJSON_GetObjectItem(item, "text");
-            if (text && text->valuestring) {
-                content = strdup(text->valuestring);
+            if (item) {
+                cJSON *text = cJSON_GetObjectItem(item, "text");
+                if (text && text->valuestring) {
+                    content = strdup(text->valuestring);
+                }
             }
         }
     } else {
         cJSON *choices = cJSON_GetObjectItem(json, "choices");
+        fprintf(stderr, "[DEBUG] provider_chat_sync: choices = %p\n", (void*)choices);
         if (choices && cJSON_GetArraySize(choices) > 0) {
             cJSON *choice = cJSON_GetArrayItem(choices, 0);
-            cJSON *msg = cJSON_GetObjectItem(choice, "message");
-            cJSON *msg_content = cJSON_GetObjectItem(msg, "content");
-            if (msg_content && msg_content->valuestring) {
-                content = strdup(msg_content->valuestring);
+            if (choice) {
+                cJSON *msg = cJSON_GetObjectItem(choice, "message");
+                if (msg) {
+                    cJSON *msg_content = cJSON_GetObjectItem(msg, "content");
+                    if (msg_content && msg_content->valuestring) {
+                        content = strdup(msg_content->valuestring);
+                    }
+                }
             }
         }
     }
     
     cJSON_Delete(json);
+    fprintf(stderr, "[DEBUG] provider_chat_sync: returning content=%s, len=%zu\n", content ? "non-null" : "NULL", content ? strlen(content) : 0);
     return content;
 }
 

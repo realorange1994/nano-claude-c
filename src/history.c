@@ -125,7 +125,20 @@ void history_add_tool_result(History *h, const char *parent_id, const char *tool
     e->role = ROLE_TOOL;
     if (parent_id) strncpy(e->parent_id, parent_id, sizeof(e->parent_id) - 1);
     e->tool_name = tool_name ? strdup(tool_name) : NULL;
-    e->tool_result = strdup(tool_result);
+
+    // Truncate tool result to prevent context overflow
+    // Use MAX_TOOL_RESULT_LEN characters + truncation suffix
+    size_t result_len = strlen(tool_result);
+    if (result_len > MAX_TOOL_RESULT_LEN) {
+        char *truncated = malloc(MAX_TOOL_RESULT_LEN + 32);
+        if (truncated) {
+            memcpy(truncated, tool_result, MAX_TOOL_RESULT_LEN);
+            strcpy(truncated + MAX_TOOL_RESULT_LEN, "\n... [truncated] ...");
+        }
+        e->tool_result = truncated ? truncated : strdup("[output too large]");
+    } else {
+        e->tool_result = strdup(tool_result);
+    }
     history_generate_id(e->id, sizeof(e->id));
 }
 
@@ -191,7 +204,12 @@ int history_estimate_tokens(History *h) {
 }
 
 bool history_needs_compact(History *h) {
-    int threshold = h->context_window - h->reserve_tokens;
+    // Threshold: context_window - reserve_tokens - keep_recent_tokens/2
+    // This gives more room before triggering compact
+    int threshold = h->context_window - h->reserve_tokens - (h->keep_recent_tokens / 2);
+    if (threshold < h->context_window / 2) {
+        threshold = h->context_window / 2;  // At least 50% of context window
+    }
     return history_estimate_tokens(h) > threshold;
 }
 
@@ -375,74 +393,3 @@ void history_compact(History *h, char *(*summarize_fn)(const char *)) {
 // ============================================================================
 // File operation tracking
 // ============================================================================
-
-static void fileset_add(FileSet *fs, const char *path) {
-    if (!path || !path[0]) return;
-    for (int i = 0; i < fs->count; i++) {
-        if (strcmp(fs->paths[i], path) == 0) return;
-    }
-    if (fs->count < MAX_FILE_PATHS) {
-        fs->paths[fs->count++] = strdup(path);
-    }
-}
-
-const char **history_get_read_files(History *h, int *count) {
-    *count = h->read_files.count;
-    return (const char **)h->read_files.paths;
-}
-
-const char **history_get_written_files(History *h, int *count) {
-    *count = h->written_files.count;
-    return (const char **)h->written_files.paths;
-}
-
-const char **history_get_edited_files(History *h, int *count) {
-    *count = h->edited_files.count;
-    return (const char **)h->edited_files.paths;
-}
-
-char *history_format_file_ops(History *h) {
-    Buffer buf;
-    buffer_init(&buf);
-
-    if (h->read_files.count > 0) {
-        buffer_append_str(&buf, "Read files:\n");
-        for (int i = 0; i < h->read_files.count; i++) {
-            buffer_append_str(&buf, "  - ");
-            buffer_append_str(&buf, h->read_files.paths[i]);
-            buffer_append_str(&buf, "\n");
-        }
-    }
-    if (h->written_files.count > 0) {
-        buffer_append_str(&buf, "Written files:\n");
-        for (int i = 0; i < h->written_files.count; i++) {
-            buffer_append_str(&buf, "  - ");
-            buffer_append_str(&buf, h->written_files.paths[i]);
-            buffer_append_str(&buf, "\n");
-        }
-    }
-    if (h->edited_files.count > 0) {
-        buffer_append_str(&buf, "Edited files:\n");
-        for (int i = 0; i < h->edited_files.count; i++) {
-            buffer_append_str(&buf, "  - ");
-            buffer_append_str(&buf, h->edited_files.paths[i]);
-            buffer_append_str(&buf, "\n");
-        }
-    }
-
-    char *result = strdup(buffer_c_str(&buf));
-    buffer_free(&buf);
-    return result;
-}
-
-// ============================================================================
-// Utility
-// ============================================================================
-
-int history_count(History *h) {
-    return h->count;
-}
-
-const Entry *history_get_entries(History *h) {
-    return h->entries;
-}
