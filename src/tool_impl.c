@@ -3,6 +3,35 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <windows.h>
+
+// Convert GBK (CP936) output from bash to UTF-8 for proper Chinese display
+static char *convert_gbk_to_utf8(const char *input) {
+    if (!input) return NULL;
+
+    // First convert GBK to UTF-16
+    int wlen = MultiByteToWideChar(936, 0, input, -1, NULL, 0);
+    if (wlen == 0) return strdup(input);  // Fallback: return as-is
+
+    wchar_t *wbuf = malloc(wlen * sizeof(wchar_t));
+    if (!wbuf) return strdup(input);
+
+    MultiByteToWideChar(936, 0, input, -1, wbuf, wlen);
+
+    // Then convert UTF-16 to UTF-8
+    int ulen = WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, NULL, 0, NULL, NULL);
+    if (ulen == 0) {
+        free(wbuf);
+        return strdup(input);
+    }
+
+    char *result = malloc(ulen);
+    if (result) {
+        WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, result, ulen, NULL, NULL);
+    }
+    free(wbuf);
+    return result ? result : strdup(input);
+}
 #include <math.h>
 #include <windows.h>
 #include <io.h>
@@ -376,10 +405,9 @@ char *tool_exec(cJSON *input, char **error) {
         return NULL;
     }
 
-    // Build command line: "bash" -c 'chcp 65001 > NUL && command'
-    // chcp 65001 sets UTF-8 code page for proper Chinese output
+    // Build command line: "bash" -c 'command'
     char cmd_line[8192];
-    snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c 'chcp 65001 > NUL && %s'", bash_exe, escaped);
+    snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c '%s'", bash_exe, escaped);
     free(escaped);
 
     // Use CreateProcess with CREATE_NEW_PROCESS_GROUP so Ctrl+C is NOT sent to bash.
@@ -439,11 +467,12 @@ char *tool_exec(cJSON *input, char **error) {
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
+    // Convert GBK output to UTF-8 for proper Chinese display
     char *result = buffer_c_str(&buf);
-    char *ret = strdup(result);
+    char *utf8_result = convert_gbk_to_utf8(result);
     buffer_free(&buf);
 
-    return ret ? ret : strdup("");
+    return utf8_result ? utf8_result : strdup("");
 }
 
 char *tool_calc(cJSON *input, char **error) {
