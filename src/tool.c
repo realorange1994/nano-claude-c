@@ -118,11 +118,20 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON *grep_schema = cJSON_CreateObject();
     cJSON_AddItemToObject(grep_schema, "type", cJSON_CreateString("object"));
     cJSON *grep_props = cJSON_CreateObject();
-    cJSON *pat_prop = cJSON_CreateObject(); cJSON_AddItemToObject(pat_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(pat_prop, "description", cJSON_CreateString("Search pattern")); cJSON_AddItemToObject(grep_props, "pattern", pat_prop);
-    cJSON *gpath_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gpath_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gpath_prop, "description", cJSON_CreateString("File path to search")); cJSON_AddItemToObject(grep_props, "path", gpath_prop);
+    cJSON *pat_prop = cJSON_CreateObject(); cJSON_AddItemToObject(pat_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(pat_prop, "description", cJSON_CreateString("REQUIRED: The regex pattern to search for")); cJSON_AddItemToObject(grep_props, "pattern", pat_prop);
+    cJSON *gpath_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gpath_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gpath_prop, "description", cJSON_CreateString("Path to search in (default: current directory)")); cJSON_AddItemToObject(grep_props, "path", gpath_prop);
+    cJSON *glob_prop = cJSON_CreateObject(); cJSON_AddItemToObject(glob_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(glob_prop, "description", cJSON_CreateString("Glob pattern to filter files (e.g., '*.go', '**/*.txt')")); cJSON_AddItemToObject(grep_props, "glob", glob_prop);
+    cJSON *ftype_prop = cJSON_CreateObject(); cJSON_AddItemToObject(ftype_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(ftype_prop, "description", cJSON_CreateString("File type filter (e.g., 'go', 'py', 'js', 'txt')")); cJSON_AddItemToObject(grep_props, "fileType", ftype_prop);
+    cJSON *ctx_prop = cJSON_CreateObject(); cJSON_AddItemToObject(ctx_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(ctx_prop, "description", cJSON_CreateString("Lines of context before and after matches")); cJSON_AddItemToObject(grep_props, "context", ctx_prop);
+    cJSON *mcnt_prop = cJSON_CreateObject(); cJSON_AddItemToObject(mcnt_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(mcnt_prop, "description", cJSON_CreateString("Maximum number of matches per file (0 = unlimited)")); cJSON_AddItemToObject(grep_props, "maxCount", mcnt_prop);
+    cJSON *mres_prop = cJSON_CreateObject(); cJSON_AddItemToObject(mres_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(mres_prop, "description", cJSON_CreateString("Maximum total results (default: 250)")); cJSON_AddItemToObject(grep_props, "maxResults", mres_prop);
+    cJSON *omode_prop = cJSON_CreateObject(); cJSON_AddItemToObject(omode_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(omode_prop, "description", cJSON_CreateString("Output mode: 'content' (default), 'files_with_matches', 'count'")); cJSON_AddItemToObject(grep_props, "outputMode", omode_prop);
+    cJSON *ibinary_prop = cJSON_CreateObject(); cJSON_AddItemToObject(ibinary_prop, "type", cJSON_CreateString("boolean")); cJSON_AddItemToObject(ibinary_prop, "description", cJSON_CreateString("Include binary files in search (default: false)")); cJSON_AddItemToObject(grep_props, "includeBinary", ibinary_prop);
+    cJSON *cs_prop = cJSON_CreateObject(); cJSON_AddItemToObject(cs_prop, "type", cJSON_CreateString("boolean")); cJSON_AddItemToObject(cs_prop, "description", cJSON_CreateString("Case sensitive matching (default: false)")); cJSON_AddItemToObject(grep_props, "caseSensitive", cs_prop);
+    cJSON *mll_prop = cJSON_CreateObject(); cJSON_AddItemToObject(mll_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(mll_prop, "description", cJSON_CreateString("Maximum line length to include (default: 500)")); cJSON_AddItemToObject(grep_props, "maxLineLength", mll_prop);
     cJSON_AddItemToObject(grep_schema, "properties", grep_props);
-    cJSON *grep_required = cJSON_CreateArray(); cJSON_AddItemToArray(grep_required, cJSON_CreateString("pattern")); cJSON_AddItemToArray(grep_required, cJSON_CreateString("path")); cJSON_AddItemToObject(grep_schema, "required", grep_required);
-    tool_register(reg, "Grep", "Search for pattern in file", grep_schema, tool_grep);
+    cJSON *grep_required = cJSON_CreateArray(); cJSON_AddItemToArray(grep_required, cJSON_CreateString("pattern")); cJSON_AddItemToObject(grep_schema, "required", grep_required);
+    tool_register(reg, "Grep", "Search file contents for a pattern. Supports regex patterns, glob filters, file type filters, and context lines.", grep_schema, tool_grep);
 
     // Glob tool
     cJSON *glob_schema = cJSON_CreateObject();

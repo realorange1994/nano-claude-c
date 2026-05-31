@@ -1,4 +1,5 @@
 #include "tool.h"
+#include "rgrep.h"
 #include "buffer.h"
 #include <stdlib.h>
 #include <string.h>
@@ -816,44 +817,66 @@ static int fuzzy_find_text(const char *content, const char *search) {
 char *tool_grep(cJSON *input, char **error) {
     cJSON *pattern = cJSON_GetObjectItem(input, "pattern");
     cJSON *path = cJSON_GetObjectItem(input, "path");
+    cJSON *glob = cJSON_GetObjectItem(input, "glob");
+    cJSON *file_type = cJSON_GetObjectItem(input, "fileType");
+    cJSON *context = cJSON_GetObjectItem(input, "context");
+    cJSON *max_count = cJSON_GetObjectItem(input, "maxCount");
+    cJSON *max_results = cJSON_GetObjectItem(input, "maxResults");
+    cJSON *output_mode = cJSON_GetObjectItem(input, "outputMode");
+    cJSON *include_binary = cJSON_GetObjectItem(input, "includeBinary");
+    cJSON *case_sensitive = cJSON_GetObjectItem(input, "caseSensitive");
+    cJSON *max_line_length = cJSON_GetObjectItem(input, "maxLineLength");
     
     if (!pattern || !pattern->valuestring) {
         *error = strdup("missing pattern parameter");
         return NULL;
     }
-    if (!path || !path->valuestring) {
-        *error = strdup("missing path parameter");
-        return NULL;
-    }
     
-    FILE *f = utf8_fopen(path->valuestring, "r");
-    if (!f) {
-        *error = strdup("failed to open file");
-        return NULL;
-    }
+    // Build config
+    RGrepConfig cfg = {0};
+    cfg.pattern = pattern->valuestring;
+    cfg.path = (path && path->valuestring) ? path->valuestring : ".";
+    cfg.glob = (glob && glob->valuestring) ? glob->valuestring : NULL;
+    cfg.file_type = (file_type && file_type->valuestring) ? file_type->valuestring : NULL;
+    cfg.context = (context && context->type == cJSON_Number) ? (int)context->valuedouble : 0;
+    cfg.max_count = (max_count && max_count->type == cJSON_Number) ? (int)max_count->valuedouble : 0;
+    cfg.max_results = (max_results && max_results->type == cJSON_Number) ? (int)max_results->valuedouble : 250;
+    cfg.max_line_length = (max_line_length && max_line_length->type == cJSON_Number) ? (int)max_line_length->valuedouble : 500;
+    cfg.case_sensitive = (case_sensitive && case_sensitive->type == cJSON_True);
+    cfg.include_binary = (include_binary && include_binary->type == cJSON_True);
     
-    Buffer buf;
-    buffer_init(&buf);
-    
-    char line[4096];
-    int line_num = 0;
-    while (fgets(line, sizeof(line), f)) {
-        line_num++;
-        if (strstr(line, pattern->valuestring)) {
-            char num_buf[32];
-            snprintf(num_buf, sizeof(num_buf), "%d: ", line_num);
-            buffer_append_str(&buf, num_buf);
-            buffer_append_str(&buf, line);
+    // Output mode
+    if (output_mode && output_mode->valuestring) {
+        if (strcmp(output_mode->valuestring, "files_with_matches") == 0) {
+            cfg.output_mode = OUTPUT_FILES;
+        } else if (strcmp(output_mode->valuestring, "count") == 0) {
+            cfg.output_mode = OUTPUT_COUNT;
+        } else {
+            cfg.output_mode = OUTPUT_CONTENT;
         }
+    } else {
+        cfg.output_mode = OUTPUT_CONTENT;
     }
     
-    fclose(f);
+    // Perform search
+    RGrepResult *result = rgrep_search(&cfg);
+    if (!result) {
+        *error = strdup("search failed");
+        return NULL;
+    }
     
-    char *result = buffer_c_str(&buf);
-    char *ret = strdup(result);
-    buffer_free(&buf);
+    char *output = rgrep_get_output(result);
+    rgrep_free_result(result);
     
-    return ret ? ret : strdup("");
+    if (!output) return strdup("");
+    
+    // Remove trailing newline if present
+    size_t len = strlen(output);
+    if (len > 0 && output[len - 1] == '\n') {
+        output[len - 1] = '\0';
+    }
+    
+    return output;
 }
 
 char *tool_glob(cJSON *input, char **error) {
