@@ -365,25 +365,56 @@ static char *build_history_text(REPL *repl) {
 }
 
 static void repl_run_compaction(REPL *repl) {
+    if (!repl) return;
+
+    printf("[DEBUG] entering repl_run_compaction\n");
+    fflush(stdout);
+
     char *history_text = build_history_text(repl);
     if (!history_text || !history_text[0]) {
         free(history_text);
+        printf("[Compaction skipped: no history to summarize]\n");
         return;
     }
 
+    printf("[DEBUG] history_text built, length=%zu\n", strlen(history_text));
+    fflush(stdout);
+
     char *prompt = malloc(strlen(history_text) + strlen(SUMMARIZATION_PROMPT) + 100);
-    if (!prompt) { free(history_text); return; }
+    if (!prompt) {
+        free(history_text);
+        printf("[Compaction failed: out of memory]\n");
+        return;
+    }
     sprintf(prompt, "%s\n\n%s", SUMMARIZATION_PROMPT, history_text);
     free(history_text);
 
     cJSON *messages = cJSON_CreateArray();
+    if (!messages) {
+        free(prompt);
+        printf("[Compaction failed: cJSON error]\n");
+        return;
+    }
     cJSON *msg = cJSON_CreateObject();
+    if (!msg) {
+        cJSON_Delete(messages);
+        free(prompt);
+        printf("[Compaction failed: cJSON error]\n");
+        return;
+    }
     cJSON_AddItemToObject(msg, "role", cJSON_CreateString("user"));
     cJSON_AddItemToObject(msg, "content", cJSON_CreateString(prompt));
     cJSON_AddItemToArray(messages, msg);
     free(prompt);
 
+    printf("[DEBUG] sending compaction request...\n");
+    fflush(stdout);
+
     char *summary = provider_chat_sync(repl->provider, messages);
+
+    printf("[DEBUG] compaction response received, length=%zu\n", summary ? strlen(summary) : 0);
+    fflush(stdout);
+
     cJSON_Delete(messages);
 
     if (summary && summary[0]) {
