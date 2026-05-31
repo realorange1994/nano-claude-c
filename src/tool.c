@@ -2,9 +2,13 @@
 #include "buffer.h"
 #include <stdlib.h>
 #include <string.h>
+#include <windows.h>
 
 // Tool registry
 static int g_in_tool = 0;
+
+// Tool timeout flag (set to 1 to request cancellation)
+volatile LONG g_tool_timeout = 0;
 
 ToolRegistry *tool_registry_new(void) {
     ToolRegistry *reg = calloc(1, sizeof(ToolRegistry));
@@ -47,6 +51,14 @@ Tool *tool_find(ToolRegistry *reg, const char *name) {
     return NULL;
 }
 
+// Tool timeout (30 seconds)
+#define TOOL_TIMEOUT_MS 30000
+
+// Get current tick count (Windows)
+static DWORD tool_get_tick_count(void) {
+    return GetTickCount();
+}
+
 char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **error) {
     if (!reg || !name) {
         if (error) *error = strdup("invalid arguments");
@@ -73,10 +85,36 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
     }
     
     g_in_tool = 1;
-    char *result = tool->func(args, error);
+    
+    // Set up timeout
+    DWORD start_tick = tool_get_tick_count();
+    g_tool_timeout = 0;
+    
+    char *result = NULL;
+    __try {
+        result = tool->func(args, error);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        if (error && !*error) {
+            *error = strdup("tool crashed with exception");
+        }
+        result = NULL;
+    }
+    
     g_in_tool = 0;
+    g_tool_timeout = 0;
     
     if (created_args) cJSON_Delete(args);
+    
+    // Check timeout
+    DWORD elapsed = tool_get_tick_count() - start_tick;
+    if (elapsed > TOOL_TIMEOUT_MS) {
+        g_tool_timeout = 1;
+        if (error && !*error) {
+            *error = strdup("tool execution timeout (>30s)");
+        }
+        if (result) { free(result); result = NULL; }
+    }
     
     return result;
 }

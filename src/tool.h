@@ -4,6 +4,17 @@
 #include <stdbool.h>
 #include "cJSON.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+// Tool timeout flag (checked by long-running operations)
+#ifdef _WIN32
+extern volatile LONG g_tool_timeout;
+#else
+extern volatile int g_tool_timeout;
+#endif
+
 #define MAX_TOOLS 128
 
 typedef struct Tool Tool;
