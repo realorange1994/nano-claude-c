@@ -41,22 +41,11 @@ typedef struct {
     size_t len;
 } Lexer;
 
-// Context for variables and functions
+// Context for variables
 typedef struct {
-    double vars[8];           // pi, e, phi, tau, inf, nan, 2 unused
+    double vars[8];
     const char *var_names[8];
 } CalcContext;
-
-// Function pointer type
-typedef double (*CalcFunc)(double *args, int n);
-
-// Built-in functions
-typedef struct {
-    const char *name;
-    CalcFunc func;
-    int min_args;
-    int max_args;
-} CalcBuiltinFunc;
 
 // Create lexer
 static void lexer_init(Lexer *lex, const char *expr) {
@@ -76,12 +65,6 @@ static void lexer_skip_ws(Lexer *lex) {
 static char lexer_peek(Lexer *lex) {
     if (lex->pos >= lex->len) return '\0';
     return lex->expr[lex->pos];
-}
-
-// Consume current char
-static char lexer_next(Lexer *lex) {
-    if (lex->pos >= lex->len) return '\0';
-    return lex->expr[lex->pos++];
 }
 
 // Get next token
@@ -167,10 +150,11 @@ static void parser_next(Parser *p) {
 
 // Get variable value
 static double get_var(const char *name, CalcContext *ctx) {
-    if (strcmp(name, "pi") == 0) return 3.141592653589793;
+    (void)ctx;
+    if (strcmp(name, "pi") == 0) return M_PI;
     if (strcmp(name, "e") == 0) return 2.718281828459045;
     if (strcmp(name, "phi") == 0) return 1.618033988749895;
-    if (strcmp(name, "tau") == 0) return 6.283185307179586;
+    if (strcmp(name, "tau") == 0) return 2 * M_PI;
     if (strcmp(name, "inf") == 0) return INFINITY;
     if (strcmp(name, "nan") == 0) return NAN;
     return 0;
@@ -178,7 +162,7 @@ static double get_var(const char *name, CalcContext *ctx) {
 
 // Evaluate function
 static double eval_func(const char *name, double *args, int n, CalcContext *ctx) {
-    (void)ctx;  // unused
+    (void)ctx;
     
     // Trigonometric
     if (strcmp(name, "sin") == 0 && n >= 1) return sin(args[0]);
@@ -257,19 +241,19 @@ static double eval_func(const char *name, double *args, int n, CalcContext *ctx)
 
 // Forward declarations for parsing functions
 static double parse_expr(Parser *p);
-static double parse_term(Parser *p);
+static double parse_factor(Parser *p);
 static double parse_power(Parser *p);
 static double parse_unary(Parser *p);
 static double parse_primary(Parser *p);
 
 // Parse expression: + -
 static double parse_expr(Parser *p) {
-    double left = parse_term(p);
+    double left = parse_factor(p);
     
     while (p->current.type == TOKEN_PLUS || p->current.type == TOKEN_MINUS) {
         int op = p->current.type;
         parser_next(p);
-        double right = parse_term(p);
+        double right = parse_factor(p);
         if (op == TOKEN_PLUS) left += right;
         else left -= right;
     }
@@ -277,21 +261,92 @@ static double parse_expr(Parser *p) {
     return left;
 }
 
-// Parse term: * / %
-static double parse_term(Parser *p) {
+// Parse factor: * / % and implicit multiplication
+static double parse_factor(Parser *p) {
     double left = parse_power(p);
     
-    while (p->current.type == TOKEN_MUL || p->current.type == TOKEN_DIV || 
-           p->current.type == TOKEN_MOD) {
-        int op = p->current.type;
-        parser_next(p);
-        double right = parse_power(p);
-        if (op == TOKEN_MUL) left *= right;
-        else if (op == TOKEN_DIV) {
+    while (1) {
+        // Explicit multiplication/division/modulo
+        if (p->current.type == TOKEN_MUL) {
+            parser_next(p);
+            left *= parse_power(p);
+        } else if (p->current.type == TOKEN_DIV) {
+            parser_next(p);
+            double right = parse_power(p);
             if (right == 0) return NAN;
             left /= right;
-        } else {
-            left = fmod(left, right);
+        } else if (p->current.type == TOKEN_MOD) {
+            parser_next(p);
+            left = fmod(left, parse_power(p));
+        }
+        // Implicit multiplication: number followed by ( or identifier
+        else if (p->current.type == TOKEN_LPAREN) {
+            parser_next(p);
+            double right = parse_expr(p);
+            if (p->current.type != TOKEN_RPAREN) return NAN;
+            parser_next(p);
+            left *= right;
+        }
+        // Implicit multiplication: number followed by identifier (e.g., 2pi)
+        else if (p->current.type == TOKEN_IDENT) {
+            char *name = strdup(p->current.ident);
+            parser_next(p);
+            double right;
+            
+            // Check if this is a function or variable
+            if (p->current.type == TOKEN_LPAREN) {
+                // Check if it's a known function by testing eval_func
+                double test_args[1] = {0};
+                double fn_result = eval_func(name, test_args, 0, p->ctx);
+                
+                // If eval_func returns 0 with 0 args, it's not a function (or is a function that returns 0)
+                // We need a better way to check if it's a function...
+                // For now, check if it's a known variable first
+                double var_val = get_var(name, p->ctx);
+                int is_variable = (strcmp(name, "pi") == 0 || strcmp(name, "e") == 0 || 
+                                   strcmp(name, "phi") == 0 || strcmp(name, "tau") == 0 ||
+                                   strcmp(name, "inf") == 0 || strcmp(name, "nan") == 0);
+                
+                if (is_variable) {
+                    // It's a variable followed by (expr), treat as implicit multiplication
+                    // First consume the (
+                    parser_next(p);
+                    double mul_expr = parse_expr(p);
+                    if (p->current.type != TOKEN_RPAREN) {
+                        free(name);
+                        return NAN;
+                    }
+                    parser_next(p);  // consume )
+                    right = var_val * mul_expr;
+                } else {
+                    // It's a function call
+                    parser_next(p);
+                    double args[16];
+                    int n = 0;
+                    if (p->current.type != TOKEN_RPAREN) {
+                        args[n++] = parse_expr(p);
+                        while (p->current.type == TOKEN_COMMA && n < 16) {
+                            parser_next(p);
+                            args[n++] = parse_expr(p);
+                        }
+                    }
+                    if (p->current.type != TOKEN_RPAREN) {
+                        free(name);
+                        return NAN;
+                    }
+                    parser_next(p);
+                    right = eval_func(name, args, n, p->ctx);
+                }
+            } else {
+                // Simple variable
+                right = get_var(name, p->ctx);
+            }
+            free(name);
+            left *= right;
+        }
+        // Implicit multiplication: closing paren followed by ( or identifier
+        else {
+            break;
         }
     }
     
@@ -311,7 +366,7 @@ static double parse_power(Parser *p) {
     return base;
 }
 
-// Parse unary: - + !
+// Parse unary: - + 
 static double parse_unary(Parser *p) {
     if (p->current.type == TOKEN_MINUS) {
         parser_next(p);
@@ -345,27 +400,47 @@ static double parse_primary(Parser *p) {
         
         // Check for function call
         if (p->current.type == TOKEN_LPAREN) {
-            parser_next(p);  // consume (
+            // Check if it's a known variable (pi, e, phi, tau) followed by implicit multiplication
+            double var_val = get_var(name, p->ctx);
+            int is_known_var = (strcmp(name, "pi") == 0 || strcmp(name, "e") == 0 || 
+                               strcmp(name, "phi") == 0 || strcmp(name, "tau") == 0 ||
+                               strcmp(name, "inf") == 0 || strcmp(name, "nan") == 0);
             
-            // Parse arguments
-            double args[16];
-            int n = 0;
-            
-            if (p->current.type != TOKEN_RPAREN) {
-                args[n++] = parse_expr(p);
-                while (p->current.type == TOKEN_COMMA && n < 16) {
-                    parser_next(p);
-                    args[n++] = parse_expr(p);
+            if (is_known_var) {
+                // pi(3) means pi * (3), not a function call
+                // Consume the (
+                parser_next(p);
+                double mul_expr = parse_expr(p);
+                if (p->current.type != TOKEN_RPAREN) {
+                    free(name);
+                    return NAN;
                 }
+                parser_next(p);  // consume )
+                result = var_val * mul_expr;
+            } else {
+                // It's a function call
+                parser_next(p);  // consume (
+                
+                // Parse arguments
+                double args[16];
+                int n = 0;
+                
+                if (p->current.type != TOKEN_RPAREN) {
+                    args[n++] = parse_expr(p);
+                    while (p->current.type == TOKEN_COMMA && n < 16) {
+                        parser_next(p);
+                        args[n++] = parse_expr(p);
+                    }
+                }
+                
+                if (p->current.type != TOKEN_RPAREN) {
+                    free(name);
+                    return NAN;
+                }
+                parser_next(p);  // consume )
+                
+                result = eval_func(name, args, n, p->ctx);
             }
-            
-            if (p->current.type != TOKEN_RPAREN) {
-                free(name);
-                return NAN;
-            }
-            parser_next(p);  // consume )
-            
-            result = eval_func(name, args, n, p->ctx);
         } else {
             // Variable
             result = get_var(name, p->ctx);
@@ -384,11 +459,6 @@ static double parse_primary(Parser *p) {
         }
         parser_next(p);
         return val;
-    }
-    
-    // Implicit multiplication: 2pi, 3(4)
-    if (type == TOKEN_EOF || type == TOKEN_RPAREN) {
-        return 1;  // For implicit multiplication at end
     }
     
     return NAN;
