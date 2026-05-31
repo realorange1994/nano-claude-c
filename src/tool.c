@@ -2,8 +2,8 @@
 #include "buffer.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <windows.h>
-#include <setjmp.h>
 #include <signal.h>
 
 // Tool registry
@@ -12,8 +12,7 @@ static int g_in_tool = 0;
 // Tool timeout flag (set to 1 to request cancellation)
 volatile LONG g_tool_timeout = 0;
 
-// Exception handling with setjmp/longjmp
-static jmp_buf g_crash_buf;
+// Exception handling with signals (no setjmp)
 static volatile int g_crashed = 0;
 
 // Store old handlers
@@ -21,15 +20,27 @@ typedef void (*sig_handler_t)(int);
 static sig_handler_t g_old_sigabrt = NULL;
 static sig_handler_t g_old_sigfpe = NULL;
 static sig_handler_t g_old_sigsegv = NULL;
+static sig_handler_t g_old_sigill = NULL;
+static sig_handler_t g_old_sigint = NULL;
 
-// Crash handler - called from signal handlers
+// Simple file-based debug logging
+static void debug_log(const char *msg) {
+    FILE *f = fopen("E:\\\\Git\\\\nanoclaude-c\\\\debug.log", "a");
+    if (f) {
+        fprintf(f, "%s\n", msg);
+        fclose(f);
+    }
+}
+
+// Crash handler
 static void tool_crash_handler(int sig) {
     g_crashed = 1;
-    // Restore default handlers before longjmp
-    signal(SIGABRT, SIG_DFL);
-    signal(SIGFPE, SIG_DFL);
-    signal(SIGSEGV, SIG_DFL);
-    longjmp(g_crash_buf, 1);
+    FILE *f = fopen("E:\\\\Git\\\\nanoclaude-c\\\\debug.log", "a");
+    if (f) {
+        fprintf(f, "[CRASH] Signal %d received\n", sig);
+        fclose(f);
+    }
+    // Don't try to longjmp, just set flag and return
 }
 
 // Begin crash protection - install signal handlers
@@ -37,13 +48,18 @@ static void _begin_crash_protection(void) {
     g_old_sigabrt = signal(SIGABRT, tool_crash_handler);
     g_old_sigfpe = signal(SIGFPE, tool_crash_handler);
     g_old_sigsegv = signal(SIGSEGV, tool_crash_handler);
+    g_old_sigill = signal(SIGILL, tool_crash_handler);
+    g_old_sigint = signal(SIGINT, tool_crash_handler);
+    g_crashed = 0;
 }
 
 // End crash protection - restore original handlers
 static void _end_crash_protection(void) {
-    if (g_old_sigabrt) signal(SIGABRT, g_old_sigabrt);
-    if (g_old_sigfpe) signal(SIGFPE, g_old_sigfpe);
-    if (g_old_sigsegv) signal(SIGSEGV, g_old_sigsegv);
+    if (g_old_sigabrt && g_old_sigabrt != SIG_ERR) signal(SIGABRT, g_old_sigabrt);
+    if (g_old_sigfpe && g_old_sigfpe != SIG_ERR) signal(SIGFPE, g_old_sigfpe);
+    if (g_old_sigsegv && g_old_sigsegv != SIG_ERR) signal(SIGSEGV, g_old_sigsegv);
+    if (g_old_sigill && g_old_sigill != SIG_ERR) signal(SIGILL, g_old_sigill);
+    if (g_old_sigint && g_old_sigint != SIG_ERR) signal(SIGINT, g_old_sigint);
 }
 
 ToolRegistry *tool_registry_new(void) {
@@ -96,6 +112,10 @@ static DWORD tool_get_tick_count(void) {
 }
 
 char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **error) {
+    char dbg[256];
+    snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: starting '%s'", name ? name : "(null)");
+    debug_log(dbg);
+    
     if (!reg || !name) {
         if (error) *error = strdup("invalid arguments");
         return NULL;
@@ -121,7 +141,6 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
     }
     
     g_in_tool = 1;
-    g_crashed = 0;
     
     // Set up timeout
     DWORD start_tick = tool_get_tick_count();
@@ -130,18 +149,23 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
     // Install crash handlers
     _begin_crash_protection();
     
-    char *result = NULL;
+    snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: calling '%s'", name);
+    debug_log(dbg);
     
-    // Set jump point for crash recovery
-    if (setjmp(g_crash_buf) == 0) {
-        // Normal execution
-        result = tool->func(args, error);
-    } else {
-        // Crash recovered
+    // Execute tool
+    char *result = tool->func(args, error);
+    
+    snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: '%s' returned", name);
+    debug_log(dbg);
+    
+    // Check if tool crashed
+    if (g_crashed) {
+        snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: '%s' CRASHED!", name);
+        debug_log(dbg);
+        if (result) { free(result); result = NULL; }
         if (error && !*error) {
             *error = strdup("tool crashed and was recovered");
         }
-        result = NULL;
     }
     
     // Remove crash handlers
@@ -151,6 +175,9 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
     g_tool_timeout = 0;
     
     if (created_args) cJSON_Delete(args);
+    
+    snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: '%s' done", name);
+    debug_log(dbg);
     
     // Check timeout
     DWORD elapsed = tool_get_tick_count() - start_tick;
