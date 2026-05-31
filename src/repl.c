@@ -1,4 +1,5 @@
 #include "repl.h"
+#include "config.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -76,7 +77,7 @@ REPL *repl_new(Provider *provider, ToolRegistry *tools) {
 
     repl->provider = provider;
     repl->tools = tools;
-    history_init(&repl->history, 16384, 20000);
+    history_init(&repl->history, g_config.reserve_tokens, g_config.keep_recent_tokens, g_config.context_window);
     repl->running = true;
 
     return repl;
@@ -262,14 +263,19 @@ static void repl_accum_append(REPL *repl, const char *text) {
     size_t new_len = repl->text_len + len + 1;
     if (!repl->text_accum) {
         repl->text_accum = malloc(new_len);
-    } else {
-        repl->text_accum = realloc(repl->text_accum, new_len);
+        if (!repl->text_accum) return;
+        repl->text_cap = new_len;
+    } else if (new_len > repl->text_cap) {
+        char *new_buf = realloc(repl->text_accum, new_len * 2);
+        if (!new_buf) {
+            return;
+        }
+        repl->text_accum = new_buf;
+        repl->text_cap = new_len * 2;
     }
-    if (repl->text_accum) {
-        memcpy(repl->text_accum + repl->text_len, text, len);
-        repl->text_len += len;
-        repl->text_accum[repl->text_len] = '\0';
-    }
+    memcpy(repl->text_accum + repl->text_len, text, len);
+    repl->text_len += len;
+    repl->text_accum[repl->text_len] = '\0';
 }
 
 static void repl_accum_reset(REPL *repl) {
@@ -342,21 +348,21 @@ static char *build_history_text(REPL *repl) {
     int cap = 65536;
 
     for (int i = 0; i < repl->history.count; i++) {
-        Message *m = &repl->history.msgs[i];
-        const char *role = m->role ? m->role : "unknown";
+        Entry *m = &repl->history.entries[i];
+        const char *role_str = m->role == ROLE_USER ? "user" : (m->role == ROLE_ASSISTANT ? "assistant" : "tool");
         char *truncated = NULL;
 
-        if (m->type == MSG_ASSISTANT && m->tool_name) {
+        if (m->tool_name) {
             truncated = truncate_for_summary(m->content ? m->content : "{}", 500);
             pos += snprintf(buf + pos, cap - pos, "[ASSISTANT - Tool Call: %s]: %s\n",
                            m->tool_name, truncated);
-        } else if (m->type == MSG_TOOL) {
-            truncated = truncate_for_summary(m->tool_result ? m->tool_result : "", 500);
+        } else if (m->tool_result) {
+            truncated = truncate_for_summary(m->tool_result, 500);
             pos += snprintf(buf + pos, cap - pos, "[TOOL RESULT - %s]: %s\n",
                            m->tool_name ? m->tool_name : "unknown", truncated);
         } else {
             truncated = truncate_for_summary(m->content ? m->content : "", 1000);
-            pos += snprintf(buf + pos, cap - pos, "[%s]: %s\n", role, truncated);
+            pos += snprintf(buf + pos, cap - pos, "[%s]: %s\n", role_str, truncated);
         }
         free(truncated);
         if (pos >= cap - 100) break;
@@ -418,59 +424,7 @@ static void repl_run_compaction(REPL *repl) {
     cJSON_Delete(messages);
 
     if (summary && summary[0]) {
-        int keep = 4;
-        if (repl->history.count > keep) {
-            for (int i = 0; i < repl->history.count - keep; i++) {
-                Message *m = &repl->history.msgs[i];
-                free(m->content); free(m->tool_id); free(m->tool_name); free(m->tool_result);
-            }
-            int shift = repl->history.count - keep;
-            for (int i = 0; i < keep; i++) {
-                repl->history.msgs[i] = repl->history.msgs[i + shift];
-            }
-            for (int i = keep; i < repl->history.count; i++) {
-                memset(&repl->history.msgs[i], 0, sizeof(Message));
-            }
-            repl->history.count = keep;
-        }
-
-        // Remove orphaned tool results (like miniclaude's removeOrphanedToolResults)
-        // Use heap-allocated arrays to avoid stack overflow (MAX_MESSAGES is 1024)
-        int valid_count = 0;
-        char (*valid_ids)[256] = malloc(repl->history.count * sizeof(*valid_ids));
-        if (!valid_ids) { free(summary); return; }
-        for (int i = 0; i < repl->history.count && valid_count < MAX_MESSAGES; i++) {
-            if (repl->history.msgs[i].type == MSG_ASSISTANT && repl->history.msgs[i].tool_id) {
-                strncpy(valid_ids[valid_count], repl->history.msgs[i].tool_id, 255);
-                valid_ids[valid_count][255] = '\0';
-                valid_count++;
-            }
-        }
-        int new_count = 0;
-        for (int i = 0; i < repl->history.count; i++) {
-            Message *m = &repl->history.msgs[i];
-            if (m->type == MSG_TOOL) {
-                int found = 0;
-                if (m->tool_id) {
-                    for (int j = 0; j < valid_count; j++) {
-                        if (strcmp(m->tool_id, valid_ids[j]) == 0) { found = 1; break; }
-                    }
-                }
-                if (!found) {
-                    free(m->content); free(m->tool_id); free(m->tool_name); free(m->tool_result);
-                    memset(m, 0, sizeof(Message));
-                    continue;
-                }
-            }
-            if (new_count != i) {
-                repl->history.msgs[new_count] = *m;
-                memset(m, 0, sizeof(Message));
-            }
-            new_count++;
-        }
-        repl->history.count = new_count;
-        free(valid_ids);
-
+        // Use history_compact which handles cut point and orphan cleanup
         free(repl->history.summary);
         repl->history.summary = summary;
         printf("[History summarized. Continuing...]\n");
@@ -491,14 +445,14 @@ static void history_inject_time(History *h) {
     strftime(timebuf, sizeof(timebuf), "[Current time: %Y-%m-%d %H:%M:%S]", t);
 
     for (int i = h->count - 1; i >= 0; i--) {
-        if (h->msgs[i].type == MSG_USER && h->msgs[i].content &&
-            strncmp(h->msgs[i].content, "[Current time:", 14) == 0) {
-            free(h->msgs[i].content);
-            h->msgs[i].content = strdup(timebuf);
+        if (h->entries[i].type == ENTRY_SYSTEM && h->entries[i].content &&
+            strncmp(h->entries[i].content, "[Current time:", 14) == 0) {
+            free(h->entries[i].content);
+            h->entries[i].content = strdup(timebuf);
             return;
         }
     }
-    history_add(h, MSG_USER, timebuf);
+    history_add_system(h, timebuf);
 }
 
 // ============================================================================
@@ -603,7 +557,7 @@ int repl_run(REPL *repl) {
                 continue;
             } else if (strcmp(line, "/clear") == 0) {
                 history_free(&repl->history);
-                history_init(&repl->history, 16384, 20000);
+                history_init(&repl->history, g_config.reserve_tokens, g_config.keep_recent_tokens, g_config.context_window);
                 printf("History cleared.\n");
                 free(line);
                 continue;
@@ -621,7 +575,7 @@ int repl_run(REPL *repl) {
         }
 
         // Add user message to history
-        history_add(&repl->history, MSG_USER, line);
+        history_add_user(&repl->history, line);
         free(line);
 
         // Agent loop (like miniclaude's runLoop)
@@ -656,9 +610,9 @@ int repl_run(REPL *repl) {
 
             int tool_count = repl->pending_tool_count;
 
-            // Save reasoning text even when tool calls present (like miniclaude)
+            // Save assistant text to history
             if (repl->text_accum && repl->text_len > 0) {
-                history_add(&repl->history, MSG_ASSISTANT, repl->text_accum);
+                history_add_assistant(&repl->history, repl->text_accum);
             }
 
             // If no tool calls, check compaction and done
@@ -670,7 +624,7 @@ int repl_run(REPL *repl) {
                 break;
             }
 
-            // Record tool calls BEFORE executing (like miniclaude's AddToolCall)
+            // Record tool calls BEFORE executing
             for (int i = 0; i < tool_count; i++) {
                 history_add_tool_call(&repl->history,
                                      repl->pending_tool_ids[i],
@@ -698,12 +652,12 @@ int repl_run(REPL *repl) {
                 char *result = tool_execute(repl->tools, repl->pending_tool_names[i], args, &error);
 
                 if (result) {
-                    history_add_tool(&repl->history, repl->pending_tool_ids[i],
+                    history_add_tool_result(&repl->history, repl->pending_tool_ids[i],
                                     repl->pending_tool_names[i], result);
                     printf("%s\n", result);
                     free(result);
                 } else if (error) {
-                    history_add_tool(&repl->history, repl->pending_tool_ids[i],
+                    history_add_tool_result(&repl->history, repl->pending_tool_ids[i],
                                     repl->pending_tool_names[i], error);
                     printf("Error: %s\n", error);
                     free(error);

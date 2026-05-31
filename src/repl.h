@@ -21,6 +21,7 @@ typedef struct {
     // Streaming result tracking
     char *text_accum;    // Accumulated assistant text (reset before each stream)
     size_t text_len;
+    size_t text_cap;     // Capacity of text_accum buffer
     // Pending tool calls collected during streaming (like Go's toolCalls slice)
     char *pending_tool_names[MAX_PENDING_TOOLS];
     char *pending_tool_ids[MAX_PENDING_TOOLS];

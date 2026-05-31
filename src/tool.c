@@ -137,10 +137,27 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON *shell_schema = cJSON_CreateObject();
     cJSON_AddItemToObject(shell_schema, "type", cJSON_CreateString("object"));
     cJSON *shell_props = cJSON_CreateObject();
-    cJSON *cmd_prop = cJSON_CreateObject(); cJSON_AddItemToObject(cmd_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(cmd_prop, "description", cJSON_CreateString("Command to execute")); cJSON_AddItemToObject(shell_props, "command", cmd_prop);
+    cJSON *cmd_prop = cJSON_CreateObject(); 
+    cJSON_AddItemToObject(cmd_prop, "type", cJSON_CreateString("string")); 
+    cJSON_AddItemToObject(cmd_prop, "description", cJSON_CreateString("REQUIRED: Shell command to execute")); 
+    cJSON_AddItemToObject(shell_props, "command", cmd_prop);
+    cJSON *cwd_prop = cJSON_CreateObject(); 
+    cJSON_AddItemToObject(cwd_prop, "type", cJSON_CreateString("string")); 
+    cJSON_AddItemToObject(cwd_prop, "description", cJSON_CreateString("Working directory for the command")); 
+    cJSON_AddItemToObject(shell_props, "cwd", cwd_prop);
+    cJSON *timeout_prop = cJSON_CreateObject(); 
+    cJSON_AddItemToObject(timeout_prop, "type", cJSON_CreateNumber(120)); 
+    cJSON_AddItemToObject(timeout_prop, "description", cJSON_CreateString("Timeout in seconds (default: 120, max: 600)")); 
+    cJSON_AddItemToObject(shell_props, "timeout", timeout_prop);
     cJSON_AddItemToObject(shell_schema, "properties", shell_props);
-    cJSON *shell_required = cJSON_CreateArray(); cJSON_AddItemToArray(shell_required, cJSON_CreateString("command")); cJSON_AddItemToObject(shell_schema, "required", shell_required);
-    tool_register(reg, "Shell", "Execute shell command", shell_schema, tool_exec);
+    cJSON *shell_required = cJSON_CreateArray(); 
+    cJSON_AddItemToArray(shell_required, cJSON_CreateString("command")); 
+    cJSON_AddItemToObject(shell_schema, "required", shell_required);
+    tool_register(reg, "Shell", 
+        "Execute a shell command. Use for package installs, builds, git operations, and any shell task. "
+        "SAFETY: Dangerous patterns (rm -rf /, fork bombs, git reset --hard) are blocked. "
+        "IMPORTANT: Commands requiring user input (y/n prompts, password) will be killed with stall detection.",
+        shell_schema, tool_exec);
 
     // Calc tool
     cJSON *calc_schema = cJSON_CreateObject();

@@ -157,7 +157,11 @@ static void stream_context_append_text(StreamContext *ctx, const char *text) {
     if (needed > ctx->text_cap) {
         ctx->text_cap = needed * 2;
         char *new_buf = realloc(ctx->text_buf, ctx->text_cap);
-        if (new_buf) ctx->text_buf = new_buf;
+        if (!new_buf) {
+            ctx->text_cap = needed;
+            return;
+        }
+        ctx->text_buf = new_buf;
     }
     if (ctx->text_buf && ctx->text_cap > ctx->text_len + len) {
         memcpy(ctx->text_buf + ctx->text_len, text, len);
@@ -176,7 +180,11 @@ static void stream_context_append_tool_input(StreamContext *ctx, const char *dat
     if (needed > ctx->tool_input_cap) {
         ctx->tool_input_cap = needed * 2;
         char *new_buf = realloc(ctx->tool_input_buf, ctx->tool_input_cap);
-        if (new_buf) ctx->tool_input_buf = new_buf;
+        if (!new_buf) {
+            ctx->tool_input_cap = needed;
+            return;
+        }
+        ctx->tool_input_buf = new_buf;
     }
     if (ctx->tool_input_buf && ctx->tool_input_cap > ctx->tool_input_len + data_len) {
         memcpy(ctx->tool_input_buf + ctx->tool_input_len, data, data_len);

@@ -35,6 +35,7 @@ char *http_post(const char *url, const char *headers, const char *body, int time
             port = 443;
             strcpy(path, "/");
         } else {
+            fprintf(stderr, "[DEBUG][http_post] URL parsing failed: %s\n", url);
             return NULL;
         }
     }
@@ -42,11 +43,16 @@ char *http_post(const char *url, const char *headers, const char *body, int time
     int use_ssl = (strcmp(scheme, "https") == 0) ? 1 : 0;
     if (port == 0) port = use_ssl ? 443 : 80;
 
+    fprintf(stderr, "[DEBUG][http_post] Connecting to %s:%d (%s)\n", host, port, scheme);
+    fflush(stderr);
+
     wchar_t *w_host = utf8_to_wide(host);
     wchar_t *w_path = utf8_to_wide(path);
 
     HINTERNET hSession = WinHttpOpen(L"NanoClaude/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!hSession) {
+        fprintf(stderr, "[DEBUG][http_post] WinHttpOpen failed\n");
+        fflush(stderr);
         free(w_host); free(w_path);
         return NULL;
     }
@@ -57,6 +63,8 @@ char *http_post(const char *url, const char *headers, const char *body, int time
     free(w_host);
 
     if (!hConnect) {
+        fprintf(stderr, "[DEBUG][http_post] WinHttpConnect failed\n");
+        fflush(stderr);
         WinHttpCloseHandle(hSession);
         free(w_path);
         return NULL;
@@ -67,6 +75,8 @@ char *http_post(const char *url, const char *headers, const char *body, int time
     free(w_path);
 
     if (!hRequest) {
+        fprintf(stderr, "[DEBUG][http_post] WinHttpOpenRequest failed\n");
+        fflush(stderr);
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);
         return NULL;
@@ -85,14 +95,23 @@ char *http_post(const char *url, const char *headers, const char *body, int time
         WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
     }
 
+    fprintf(stderr, "[DEBUG][http_post] Sending request, body length: %zu\n", strlen(body));
+    fflush(stderr);
+
     BOOL result = WinHttpSendRequest(hRequest, NULL, 0, (LPVOID)body, (DWORD)strlen(body), (DWORD)strlen(body), 0);
 
     if (!result) {
+        DWORD err = GetLastError();
+        fprintf(stderr, "[DEBUG][http_post] WinHttpSendRequest failed, error code: %lu\n", err);
+        fflush(stderr);
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);
         return NULL;
     }
+
+    fprintf(stderr, "[DEBUG][http_post] Waiting for response...\n");
+    fflush(stderr);
 
     WinHttpReceiveResponse(hRequest, NULL);
 
@@ -100,7 +119,23 @@ char *http_post(const char *url, const char *headers, const char *body, int time
     DWORD size = sizeof(status_code);
     WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status_code, &size, NULL);
 
+    fprintf(stderr, "[DEBUG][http_post] Response status code: %lu\n", status_code);
+    fflush(stderr);
+
     if (status_code != 200) {
+        // Try to read error response body
+        Buffer buf;
+        buffer_init(&buf);
+        char chunk[4096];
+        DWORD bytes_read;
+        while (WinHttpReadData(hRequest, chunk, sizeof(chunk) - 1, &bytes_read) && bytes_read > 0) {
+            chunk[bytes_read] = '\0';
+            buffer_append(&buf, chunk, bytes_read);
+        }
+        fprintf(stderr, "[DEBUG][http_post] Error response: %s\n", buffer_c_str(&buf));
+        fflush(stderr);
+        buffer_free(&buf);
+
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);
@@ -124,6 +159,9 @@ char *http_post(const char *url, const char *headers, const char *body, int time
 
     char *response = buffer_c_str(&buf);
     buffer_free(&buf);
+
+    fprintf(stderr, "[DEBUG][http_post] Response received, length: %zu\n", strlen(response));
+    fflush(stderr);
 
     return response;
 }
@@ -279,19 +317,20 @@ bool http_post_stream(const char *url, const char *headers, const char *body,
 
         // Append new data to line buffer
         size_t new_len = line_buf_len + bytes_read;
-        if (new_len > line_buf_cap) {
+        if (new_len + 1 > line_buf_cap) {
             line_buf_cap = (new_len + 1) * 2;
             char *new_buf = realloc(line_buf, line_buf_cap);
             if (new_buf) {
                 line_buf = new_buf;
             } else {
-                break;  // Out of memory
+                // Allocation failed - return what we have
+                free(line_buf);
+                return false;
             }
         }
-        if (line_buf) {
-            memcpy(line_buf + line_buf_len, chunk, bytes_read + 1);
-        }
-        line_buf_len = new_len;
+        memcpy(line_buf + line_buf_len, chunk, bytes_read);
+        line_buf_len += bytes_read;
+        line_buf[line_buf_len] = '\0';
 
         // Process complete lines from buffer
         char *ptr = line_buf;
@@ -315,10 +354,11 @@ bool http_post_stream(const char *url, const char *headers, const char *body,
         }
 
         // Shift remaining incomplete line to start of buffer
-        if (ptr > line_buf && ptr <= line_buf + line_buf_len) {
+        if (ptr > line_buf) {
             size_t remaining = line_buf_len - (ptr - line_buf);
-            memmove(line_buf, ptr, remaining + 1);
+            memmove(line_buf, ptr, remaining);
             line_buf_len = remaining;
+            line_buf[line_buf_len] = '\0';
         }
     }
 
