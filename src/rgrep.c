@@ -499,6 +499,10 @@ static void walk_directory(const char *dir, RGrepConfig *cfg, RGrepResult *resul
 
 // Main search function
 RGrepResult *rgrep_search(RGrepConfig *cfg) {
+    if (!cfg || !cfg->pattern) {
+        return NULL;
+    }
+    
     RGrepResult *result = calloc(1, sizeof(RGrepResult));
     if (!result) return NULL;
     
@@ -507,17 +511,25 @@ RGrepResult *rgrep_search(RGrepConfig *cfg) {
     result->files_matched = 0;
     result->total_matches = 0;
     
+    // Use default path if not provided
+    const char *search_path = cfg->path ? cfg->path : ".";
+    
+    // Validate path
+    if (!search_path || !search_path[0]) {
+        search_path = ".";
+    }
+    
     // Check if path is a file
-    DWORD attr = GetFileAttributesA(cfg->path);
+    DWORD attr = GetFileAttributesA(search_path);
     if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
         // It's a file
-        if (should_search_file(cfg->path, cfg)) {
+        if (should_search_file(search_path, cfg)) {
             result->files_scanned = 1;
-            search_file(cfg->path, cfg, result);
+            search_file(search_path, cfg, result);
         }
     } else {
         // It's a directory
-        walk_directory(cfg->path, cfg, result);
+        walk_directory(search_path, cfg, result);
     }
     
     return result;
