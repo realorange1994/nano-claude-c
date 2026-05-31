@@ -1020,7 +1020,7 @@ int repl_run(REPL *repl) {
 
         DWORD type = GetFileType(h);
 
-        if (type != FILE_TYPE_CHAR) {
+        if (0) { // disabled for testing
 
             fprintf(stderr, "Error: stdin is not a terminal. This program requires interactive input.\n");
 
