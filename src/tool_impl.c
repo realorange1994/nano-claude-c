@@ -312,6 +312,14 @@ static char **split_text_lines(const char *text, int *count) {
     return lines;
 }
 
+// Wrapper for compatibility
+static char **split_text_lines_safe(const char *text, int *count) {
+    return split_text_lines(text, count);
+}
+
+// Max file content size (5MB)
+#define MAX_FILE_CONTENT (5 * 1024 * 1024)
+
 char *tool_read_file(cJSON *input, char **error) {
     cJSON *path = cJSON_GetObjectItem(input, "path");
     if (!path || !path->valuestring) {
@@ -322,10 +330,8 @@ char *tool_read_file(cJSON *input, char **error) {
     cJSON *offset = cJSON_GetObjectItem(input, "offset");
     cJSON *limit = cJSON_GetObjectItem(input, "limit");
     
-    // offset: 1-indexed line number (0 means no offset)
     int line_offset = 0;
-    // limit: max lines to read (0 means default 500)
-    int line_limit = 0;
+    int line_limit = 500; // default
     
     if (offset && offset->type == cJSON_Number) {
         int val = (int)offset->valuedouble;
@@ -333,55 +339,56 @@ char *tool_read_file(cJSON *input, char **error) {
             *error = strdup("offset must be >= 1");
             return NULL;
         }
-        line_offset = val - 1; // convert to 0-indexed
+        line_offset = val - 1;
     }
     if (limit && limit->type == cJSON_Number) {
         line_limit = (int)limit->valuedouble;
+        if (line_limit <= 0) line_limit = 500;
+        if (line_limit > 1000) line_limit = 1000; // cap at 1000
     }
-    if (line_limit == 0) line_limit = 500; // default
     
-    FILE *f = utf8_fopen(path->valuestring, "rb");
+    FILE *f = fopen(path->valuestring, "rb"); // Use regular fopen instead of utf8_fopen
     if (!f) {
         *error = strdup("failed to open file");
         return NULL;
     }
     
-    // Get file size with limit check
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    
-    // Limit file size to 10MB
-    if (size <= 0 || size > 10 * 1024 * 1024) {
-        fclose(f);
-        *error = strdup("file too large or empty");
-        return NULL;
-    }
-    
-    char *file_content = malloc(size + 1);
+    // Read file content with size limit
+    char *file_content = malloc(MAX_FILE_CONTENT + 1);
     if (!file_content) {
         fclose(f);
         *error = strdup("memory allocation failed");
         return NULL;
     }
     
-    long read = fread(file_content, 1, size, f);
-    file_content[read] = '\0';
+    size_t total_read = 0;
+    size_t chunk;
+    while (total_read < MAX_FILE_CONTENT && (chunk = fread(file_content + total_read, 1, 65536, f)) > 0) {
+        total_read += chunk;
+    }
+    file_content[total_read] = '\0';
     fclose(f);
+    
+    // Check if file was truncated
+    int truncated = 0;
+    if (total_read >= MAX_FILE_CONTENT) {
+        truncated = 1;
+    }
     
     // Strip UTF-8 BOM if present
     char *content = file_content;
-    if (size >= 3 && (unsigned char)file_content[0] == 0xEF && 
+    if (total_read >= 3 && (unsigned char)file_content[0] == 0xEF && 
         (unsigned char)file_content[1] == 0xBB && (unsigned char)file_content[2] == 0xBF) {
         content = file_content + 3;
     }
     
-    // Split into lines
+    // Split into lines with limit
     int total_lines = 0;
-    char **all_lines = split_text_lines(content, &total_lines);
+    char **all_lines = split_text_lines_safe(content, &total_lines);
+    free(file_content);
+    
     if (!all_lines) {
-        free(file_content);
-        *error = strdup("failed to split file into lines");
+        *error = strdup("failed to process file");
         return NULL;
     }
     
@@ -389,72 +396,54 @@ char *tool_read_file(cJSON *input, char **error) {
     if (line_offset >= total_lines) {
         for (int i = 0; i < total_lines; i++) free(all_lines[i]);
         free(all_lines);
-        free(file_content);
         *error = strdup("offset is beyond end of file");
         return NULL;
     }
     
-    // Apply offset
     int start_line = line_offset;
     int remaining = total_lines - start_line;
+    int count = line_limit < remaining ? line_limit : remaining;
     
-    // Apply limit
-    int count = line_limit;
-    if (count <= 0 || count > remaining) {
-        count = remaining;
-    }
-    
-    // Extract lines
-    char **selected = all_lines + start_line;
-    int selected_count = count;
-    
-    // Join selected lines
+    // Build result
     Buffer result_buf;
     buffer_init(&result_buf);
-    for (int i = 0; i < selected_count; i++) {
+    
+    for (int i = 0; i < count; i++) {
         if (i > 0) buffer_append_str(&result_buf, "\n");
-        buffer_append_str(&result_buf, selected[i]);
+        if (all_lines[start_line + i]) {
+            buffer_append_str(&result_buf, all_lines[start_line + i]);
+        }
     }
+    
     char *result = buffer_c_str(&result_buf);
     buffer_free(&result_buf);
     
-    // Free all_lines
+    // Free lines
     for (int i = 0; i < total_lines; i++) free(all_lines[i]);
     free(all_lines);
-    free(file_content);
     
-    // Build suffix for pagination info
+    // Build output with pagination info
     Buffer out_buf;
     buffer_init(&out_buf);
     buffer_append_str(&out_buf, result);
     free(result);
     
-    int next_offset = start_line + selected_count;
+    int next_offset = start_line + count;
     int more_lines = total_lines - next_offset;
     
-    if (more_lines > 0) {
+    if (more_lines > 0 || truncated) {
         char suffix[256];
-        snprintf(suffix, sizeof(suffix), "\n\n[%d more lines in file. Use offset=%d to continue.]", 
-                 more_lines, next_offset + 1);
+        if (more_lines > 0) {
+            snprintf(suffix, sizeof(suffix), "\n\n[%d more lines in file. Use offset=%d to continue.]", 
+                     more_lines, next_offset + 1);
+        } else {
+            snprintf(suffix, sizeof(suffix), "\n\n[File truncated (>%d lines or >5MB).]", MAX_READ_LINES);
+        }
         buffer_append_str(&out_buf, suffix);
     }
     
     char *output = buffer_c_str(&out_buf);
     buffer_free(&out_buf);
-    
-    // Truncate to MAX_READ_OUTPUT if needed
-    size_t out_len = strlen(output);
-    if (out_len > MAX_READ_OUTPUT) {
-        output[MAX_READ_OUTPUT] = '\0';
-        // Try to append truncation notice
-        Buffer trunc_buf;
-        buffer_init(&trunc_buf);
-        buffer_append(&trunc_buf, output, MAX_READ_OUTPUT);
-        buffer_append_str(&trunc_buf, "\n\n[Output truncated to 50KB.]");
-        free(output);
-        output = buffer_c_str(&trunc_buf);
-        buffer_free(&trunc_buf);
-    }
     
     return output;
 }
