@@ -217,6 +217,51 @@ static double eval_expr(const char *expr);
 // static char *json_escape(const char *str) { ... }
 
 // Built-in tool implementations
+// Max output size for Read tool (50KB)
+#define MAX_READ_OUTPUT 51200
+
+// Helper: split text into lines (returns NULL-terminated array)
+static char **split_text_lines(const char *text, int *count) {
+    if (!text) { *count = 0; return NULL; }
+    int cap = 128;
+    char **lines = malloc(cap * sizeof(char*));
+    if (!lines) return NULL;
+    int n = 0;
+    const char *start = text;
+    while (*text) {
+        if (*text == '\n') {
+            if (n >= cap - 1) {
+                cap *= 2;
+                char **tmp = realloc(lines, cap * sizeof(char*));
+                if (!tmp) { for (int i = 0; i < n; i++) free(lines[i]); free(lines); return NULL; }
+                lines = tmp;
+            }
+            size_t len = text - start;
+            lines[n] = malloc(len + 1);
+            if (!lines[n]) { for (int i = 0; i < n; i++) free(lines[i]); free(lines); return NULL; }
+            memcpy(lines[n], start, len);
+            lines[n][len] = '\0';
+            n++;
+            start = text + 1;
+        }
+        text++;
+    }
+    // Last line (no trailing newline)
+    if (*start) {
+        if (n >= cap - 1) {
+            cap *= 2;
+            char **tmp = realloc(lines, cap * sizeof(char*));
+            if (!tmp) { for (int i = 0; i < n; i++) free(lines[i]); free(lines); return NULL; }
+            lines = tmp;
+        }
+        lines[n] = strdup(start);
+        if (!lines[n]) { for (int i = 0; i < n; i++) free(lines[i]); free(lines); return NULL; }
+        n++;
+    }
+    *count = n;
+    return lines;
+}
+
 char *tool_read_file(cJSON *input, char **error) {
     cJSON *path = cJSON_GetObjectItem(input, "path");
     if (!path || !path->valuestring) {
@@ -227,16 +272,23 @@ char *tool_read_file(cJSON *input, char **error) {
     cJSON *offset = cJSON_GetObjectItem(input, "offset");
     cJSON *limit = cJSON_GetObjectItem(input, "limit");
     
-    // Handle default values: offset defaults to 0, limit defaults to -1 (all)
-    int off = 0;
-    int lim = -1;
+    // offset: 1-indexed line number (0 means no offset)
+    int line_offset = 0;
+    // limit: max lines to read (0 means default 500)
+    int line_limit = 0;
     
     if (offset && offset->type == cJSON_Number) {
-        off = (int)offset->valuedouble;
+        int val = (int)offset->valuedouble;
+        if (val < 1) {
+            *error = strdup("offset must be >= 1");
+            return NULL;
+        }
+        line_offset = val - 1; // convert to 0-indexed
     }
     if (limit && limit->type == cJSON_Number) {
-        lim = (int)limit->valuedouble;
+        line_limit = (int)limit->valuedouble;
     }
+    if (line_limit == 0) line_limit = 500; // default
     
     FILE *f = utf8_fopen(path->valuestring, "rb");
     if (!f) {
@@ -246,26 +298,107 @@ char *tool_read_file(cJSON *input, char **error) {
     
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
-    fseek(f, off, SEEK_SET);
+    fseek(f, 0, SEEK_SET);
     
-    if (lim < 0 || off + lim > size) {
-        lim = size - off;
-    }
-    
-    if (lim < 0) lim = 0;
-    
-    char *result = malloc(lim + 1);
-    if (!result) {
+    char *file_content = malloc(size + 1);
+    if (!file_content) {
         fclose(f);
         *error = strdup("memory allocation failed");
         return NULL;
     }
     
-    long read = fread(result, 1, lim, f);
-    result[read] = '\0';
+    long read = fread(file_content, 1, size, f);
+    file_content[read] = '\0';
     fclose(f);
     
-    return result;
+    // Strip UTF-8 BOM if present
+    char *content = file_content;
+    if (size >= 3 && (unsigned char)file_content[0] == 0xEF && 
+        (unsigned char)file_content[1] == 0xBB && (unsigned char)file_content[2] == 0xBF) {
+        content = file_content + 3;
+    }
+    
+    // Split into lines
+    int total_lines = 0;
+    char **all_lines = split_text_lines(content, &total_lines);
+    if (!all_lines) {
+        free(file_content);
+        *error = strdup("failed to split file into lines");
+        return NULL;
+    }
+    
+    // Check offset bounds
+    if (line_offset >= total_lines) {
+        for (int i = 0; i < total_lines; i++) free(all_lines[i]);
+        free(all_lines);
+        free(file_content);
+        *error = strdup("offset is beyond end of file");
+        return NULL;
+    }
+    
+    // Apply offset
+    int start_line = line_offset;
+    int remaining = total_lines - start_line;
+    
+    // Apply limit
+    int count = line_limit;
+    if (count <= 0 || count > remaining) {
+        count = remaining;
+    }
+    
+    // Extract lines
+    char **selected = all_lines + start_line;
+    int selected_count = count;
+    
+    // Join selected lines
+    Buffer result_buf;
+    buffer_init(&result_buf);
+    for (int i = 0; i < selected_count; i++) {
+        if (i > 0) buffer_append_str(&result_buf, "\n");
+        buffer_append_str(&result_buf, selected[i]);
+    }
+    char *result = buffer_c_str(&result_buf);
+    buffer_free(&result_buf);
+    
+    // Free all_lines
+    for (int i = 0; i < total_lines; i++) free(all_lines[i]);
+    free(all_lines);
+    free(file_content);
+    
+    // Build suffix for pagination info
+    Buffer out_buf;
+    buffer_init(&out_buf);
+    buffer_append_str(&out_buf, result);
+    free(result);
+    
+    int next_offset = start_line + selected_count;
+    int more_lines = total_lines - next_offset;
+    
+    if (more_lines > 0) {
+        char suffix[256];
+        snprintf(suffix, sizeof(suffix), "\n\n[%d more lines in file. Use offset=%d to continue.]", 
+                 more_lines, next_offset + 1);
+        buffer_append_str(&out_buf, suffix);
+    }
+    
+    char *output = buffer_c_str(&out_buf);
+    buffer_free(&out_buf);
+    
+    // Truncate to MAX_READ_OUTPUT if needed
+    size_t out_len = strlen(output);
+    if (out_len > MAX_READ_OUTPUT) {
+        output[MAX_READ_OUTPUT] = '\0';
+        // Try to append truncation notice
+        Buffer trunc_buf;
+        buffer_init(&trunc_buf);
+        buffer_append(&trunc_buf, output, MAX_READ_OUTPUT);
+        buffer_append_str(&trunc_buf, "\n\n[Output truncated to 50KB.]");
+        free(output);
+        output = buffer_c_str(&trunc_buf);
+        buffer_free(&trunc_buf);
+    }
+    
+    return output;
 }
 
 char *tool_write_file(cJSON *input, char **error) {
@@ -281,16 +414,62 @@ char *tool_write_file(cJSON *input, char **error) {
         return NULL;
     }
     
-    FILE *f = utf8_fopen(path->valuestring, "w");
+    // Create parent directories if they don't exist
+    wchar_t *w_path = utf8_to_wide(path->valuestring);
+    if (!w_path) {
+        *error = strdup("failed to convert path to wide string");
+        return NULL;
+    }
+    
+    // Get directory path
+    wchar_t *dir_path = _wcsdup(w_path);
+    if (!dir_path) {
+        free(w_path);
+        *error = strdup("memory allocation failed");
+        return NULL;
+    }
+    
+    // Find last backslash or forward slash
+    wchar_t *last_sep = wcsrchr(dir_path, L'\\');
+    wchar_t *last_fwd = wcsrchr(dir_path, L'/');
+    wchar_t *last = last_sep;
+    if (!last || (last_fwd && last_fwd > last)) last = last_fwd;
+    
+    if (last) {
+        *last = L'\0';
+        // Create directory tree
+        if (!CreateDirectoryW(dir_path, NULL)) {
+            DWORD err = GetLastError();
+            if (err != ERROR_ALREADY_EXISTS) {
+                free(w_path);
+                free(dir_path);
+                *error = strdup("failed to create directory");
+                return NULL;
+            }
+        }
+    }
+    free(dir_path);
+    
+    FILE *f = _wfopen(w_path, L"w");
+    free(w_path);
+    
     if (!f) {
-        *error = strdup("failed to open file");
+        *error = strdup("failed to open file for writing");
         return NULL;
     }
     
     fwrite(content->valuestring, 1, strlen(content->valuestring), f);
     fclose(f);
     
-    return strdup("File written successfully");
+    char *result;
+    size_t content_len = strlen(content->valuestring);
+    result = malloc(64 + strlen(path->valuestring) + 20);
+    if (result) {
+        sprintf(result, "Successfully wrote %zu bytes to %s", content_len, path->valuestring);
+    } else {
+        result = strdup("File written successfully");
+    }
+    return result;
 }
 
 char *tool_edit_file(cJSON *input, char **error) {

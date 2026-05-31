@@ -87,8 +87,8 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON_AddItemToObject(read_schema, "type", cJSON_CreateString("object"));
     cJSON *read_props = cJSON_CreateObject();
     cJSON *path_prop = cJSON_CreateObject(); cJSON_AddItemToObject(path_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(path_prop, "description", cJSON_CreateString("File path to read")); cJSON_AddItemToObject(read_props, "path", path_prop);
-    cJSON *offset_prop = cJSON_CreateObject(); cJSON_AddItemToObject(offset_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(offset_prop, "description", cJSON_CreateString("Byte offset to start reading")); cJSON_AddItemToObject(read_props, "offset", offset_prop);
-    cJSON *limit_prop = cJSON_CreateObject(); cJSON_AddItemToObject(limit_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(limit_prop, "description", cJSON_CreateString("Number of bytes to read")); cJSON_AddItemToObject(read_props, "limit", limit_prop);
+    cJSON *offset_prop = cJSON_CreateObject(); cJSON_AddItemToObject(offset_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(offset_prop, "description", cJSON_CreateString("Line number to start reading from (1-indexed, default: 1)")); cJSON_AddItemToObject(read_props, "offset", offset_prop);
+    cJSON *limit_prop = cJSON_CreateObject(); cJSON_AddItemToObject(limit_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(limit_prop, "description", cJSON_CreateString("Maximum number of lines to read (default: 500). Always use at least 250 to minimize tool calls.")); cJSON_AddItemToObject(read_props, "limit", limit_prop);
     cJSON_AddItemToObject(read_schema, "properties", read_props);
     cJSON *read_required = cJSON_CreateArray(); cJSON_AddItemToArray(read_required, cJSON_CreateString("path")); cJSON_AddItemToObject(read_schema, "required", read_required);
     tool_register(reg, "Read", "Read file contents", read_schema, tool_read_file);
@@ -101,7 +101,7 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON *wcontent_prop = cJSON_CreateObject(); cJSON_AddItemToObject(wcontent_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(wcontent_prop, "description", cJSON_CreateString("Content to write")); cJSON_AddItemToObject(write_props, "content", wcontent_prop);
     cJSON_AddItemToObject(write_schema, "properties", write_props);
     cJSON *write_required = cJSON_CreateArray(); cJSON_AddItemToArray(write_required, cJSON_CreateString("path")); cJSON_AddItemToArray(write_required, cJSON_CreateString("content")); cJSON_AddItemToObject(write_schema, "required", write_required);
-    tool_register(reg, "Write", "Write content to file", write_schema, tool_write_file);
+    tool_register(reg, "Write", "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.", write_schema, tool_write_file);
 
     // Edit tool
     cJSON *edit_schema = cJSON_CreateObject();
