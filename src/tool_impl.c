@@ -838,8 +838,8 @@ char *tool_grep(cJSON *input, char **error) {
     cfg.glob = (glob && glob->valuestring) ? glob->valuestring : NULL;
     cfg.file_type = (file_type && file_type->valuestring) ? file_type->valuestring : NULL;
     cfg.context = (context && context->type == cJSON_Number) ? (int)context->valuedouble : 0;
-    cfg.max_count = (max_count && max_count->type == cJSON_Number) ? (int)max_count->valuedouble : 0;
-    cfg.max_results = (max_results && max_results->type == cJSON_Number) ? (int)max_results->valuedouble : 250;
+    cfg.max_count = (max_count && max_count->type == cJSON_Number) ? (int)max_count->valuedouble : 100;  // Max per file
+    cfg.max_results = (max_results && max_results->type == cJSON_Number) ? (int)max_results->valuedouble : 250;  // Max total
     cfg.max_line_length = (max_line_length && max_line_length->type == cJSON_Number) ? (int)max_line_length->valuedouble : 500;
     cfg.case_sensitive = (case_sensitive && case_sensitive->type == cJSON_True);
     cfg.include_binary = (include_binary && include_binary->type == cJSON_True);
