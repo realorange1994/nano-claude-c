@@ -58,6 +58,9 @@ static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
 
         g_repl->cancelled = 1;
 
+        extern volatile LONG g_interrupted;
+        g_interrupted = 1;
+
 
 
         printf("\n[Interrupted. Press Ctrl+C again within 1.5s to exit.]\n");
@@ -310,7 +313,27 @@ char *repl_read_line_interruptible(REPL *repl) {
 
     ensure_console_input_mode();
 
-
+    // Check for pipe input using PeekNamedPipe
+    {
+        static char buf[4096];
+        HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+        DWORD avail = 0;
+        // Only try fgets if stdin has data available
+        if (PeekNamedPipe(hStdin, NULL, 0, NULL, &avail, NULL) && avail > 0) {
+            if (fgets(buf, sizeof(buf), stdin) != NULL && strlen(buf) > 0) {
+                size_t len = strlen(buf);
+                // Strip newline
+                if (len > 0 && (buf[len-1] == 10 || buf[len-1] == 13)) {
+                    buf[--len] = 0;
+                }
+                // Handle CRLF
+                if (len > 0 && buf[len-1] == 13) {
+                    buf[--len] = 0;
+                }
+                return strdup(buf);
+            }
+        }
+    }
 
     while (1) {
 

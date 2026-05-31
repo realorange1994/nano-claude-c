@@ -11,6 +11,10 @@ static int g_in_tool = 0;
 
 // Tool timeout flag (set to 1 to request cancellation)
 volatile LONG g_tool_timeout = 0;
+    g_interrupted = 0;
+
+// Interruption flag (set by Ctrl+C handler)
+volatile LONG g_interrupted = 0;
 
 // Exception handling with signals (no setjmp)
 static volatile int g_crashed = 0;
@@ -145,6 +149,7 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
     // Set up timeout
     DWORD start_tick = tool_get_tick_count();
     g_tool_timeout = 0;
+    g_interrupted = 0;
     
     // Install crash handlers
     _begin_crash_protection();
@@ -152,6 +157,13 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
     snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: calling '%s'", name);
     /* debug_log disabled */;
     
+    // Check for interruption before executing
+    if (g_interrupted) {
+        if (error) *error = strdup("interrupted");
+        result = NULL;
+        goto cleanup;
+    }
+
     // Execute tool
     char *result = tool->func(args, error);
     
@@ -168,17 +180,20 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
         }
     }
     
-    // Remove crash handlers
-    _end_crash_protection();
-    
-    g_in_tool = 0;
-    g_tool_timeout = 0;
-    
-    if (created_args) cJSON_Delete(args);
+
     
     snprintf(dbg, sizeof(dbg), "[DEBUG] tool_execute: '%s' done", name);
     /* debug_log disabled */;
     
+cleanup:
+    // Cleanup
+    _end_crash_protection();
+    g_in_tool = 0;
+    g_tool_timeout = 0;
+    g_interrupted = 0;
+
+    if (created_args) cJSON_Delete(args);
+
     // Check timeout
     DWORD elapsed = tool_get_tick_count() - start_tick;
     if (elapsed > TOOL_TIMEOUT_MS) {
@@ -286,7 +301,7 @@ void tool_register_builtins(ToolRegistry *reg) {
         "SAFETY: Dangerous patterns (rm -rf /, fork bombs, git reset --hard, docker system prune) are blocked. "
         "Output is truncated to last 2000 lines or 50KB. "
         "Use the env parameter to set environment variables. "
-        "IMPORTANT: stdin is disconnected ¡ª commands requiring user input (password prompts, y/n) will be killed with stall detection. "
+        "IMPORTANT: stdin is disconnected ï¿½ï¿½ commands requiring user input (password prompts, y/n) will be killed with stall detection. "
         "Use non-interactive flags instead (e.g., sudo -S, apt-get -y, echo y | command, --yes).",
         shell_schema, tool_exec);
 

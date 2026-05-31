@@ -11,6 +11,7 @@
 // Tool timeout flag (checked by long-running operations)
 #ifdef _WIN32
 extern volatile LONG g_tool_timeout;
+extern volatile LONG g_interrupted;
 #else
 extern volatile int g_tool_timeout;
 #endif
