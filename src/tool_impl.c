@@ -1,5 +1,6 @@
 #include "tool.h"
 #include "rgrep.h"
+#include "glob.h"
 #include "buffer.h"
 #include <stdlib.h>
 #include <string.h>
@@ -881,72 +882,48 @@ char *tool_grep(cJSON *input, char **error) {
 
 char *tool_glob(cJSON *input, char **error) {
     cJSON *pat = cJSON_GetObjectItem(input, "pattern");
+    cJSON *path = cJSON_GetObjectItem(input, "path");
+    cJSON *type = cJSON_GetObjectItem(input, "type");
+    cJSON *max_results = cJSON_GetObjectItem(input, "maxResults");
     
     if (!pat || !pat->valuestring) {
         *error = strdup("missing pattern parameter");
         return NULL;
     }
     
-    Buffer buf;
-    buffer_init(&buf);
+    // Build config
+    GlobConfig cfg = {0};
+    cfg.pattern = pat->valuestring;
+    cfg.path = (path && path->valuestring) ? path->valuestring : ".";
+    cfg.max_results = (max_results && max_results->type == cJSON_Number) ? (int)max_results->valuedouble : 100;
+    cfg.exclude_hidden = 1;  // Skip hidden files by default
     
-    // Parse pattern - support **/*.ext and *.ext formats
-    char *pattern = strdup(pat->valuestring);
-    if (!pattern) {
-        *error = strdup("memory allocation failed");
+    // Type filter
+    if (type && type->valuestring) {
+        if (strcmp(type->valuestring, "file") == 0) {
+            cfg.type_filter = GLOB_TYPE_FILE;
+        } else if (strcmp(type->valuestring, "dir") == 0) {
+            cfg.type_filter = GLOB_TYPE_DIR;
+        } else if (strcmp(type->valuestring, "all") == 0) {
+            cfg.type_filter = GLOB_TYPE_ALL;
+        } else {
+            cfg.type_filter = GLOB_TYPE_FILE;  // Default to files
+        }
+    } else {
+        cfg.type_filter = GLOB_TYPE_FILE;  // Default
+    }
+    
+    // Perform glob search
+    GlobResult *result = glob_search(&cfg);
+    if (!result) {
+        *error = strdup("glob search failed");
         return NULL;
     }
     
-    char *dir = ".";
-    char *file_pat = pattern;
+    char *output = glob_get_output(result);
+    glob_free_result(result);
     
-    // Find last slash
-    char *last_slash = strrchr(pattern, '/');
-    char *last_bslash = strrchr(pattern, '\\');
-    if (last_bslash && (!last_slash || last_bslash > last_slash)) {
-        last_slash = last_bslash;
-    }
-    
-    if (last_slash) {
-        *last_slash = '\0';
-        dir = pattern;
-        file_pat = last_slash + 1;
-    }
-    
-    // Build search path
-    char search_path[MAX_PATH];
-    if (strchr(file_pat, '*') || strchr(file_pat, '?')) {
-        // Has wildcards
-        snprintf(search_path, sizeof(search_path), "%s\\%s", dir, file_pat);
-    } else {
-        // No wildcards, add *
-        snprintf(search_path, sizeof(search_path), "%s\\%s*", dir, file_pat);
-    }
-    
-    WIN32_FIND_DATA FindFileData;
-    HANDLE hFind = FindFirstFileA(search_path, &FindFileData);
-    
-    if (hFind != INVALID_HANDLE_VALUE) {
-        do {
-            if (strcmp(FindFileData.cFileName, ".") != 0 && 
-                strcmp(FindFileData.cFileName, "..") != 0) {
-                // Build path safely
-                buffer_append_str(&buf, dir);
-                buffer_append(&buf, "\\", 1);
-                buffer_append_str(&buf, FindFileData.cFileName);
-                buffer_append(&buf, "\n", 1);
-            }
-        } while (FindNextFileA(hFind, &FindFileData));
-        FindClose(hFind);
-    }
-    
-    free(pattern);
-    
-    char *result = buffer_c_str(&buf);
-    char *ret = strdup(result);
-    buffer_free(&buf);
-    
-    return ret ? ret : strdup("");
+    return output ? output : strdup("");
 }
 
 char *tool_exec(cJSON *input, char **error) {

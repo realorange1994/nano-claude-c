@@ -137,10 +137,13 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON *glob_schema = cJSON_CreateObject();
     cJSON_AddItemToObject(glob_schema, "type", cJSON_CreateString("object"));
     cJSON *glob_props = cJSON_CreateObject();
-    cJSON *gpat_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gpat_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gpat_prop, "description", cJSON_CreateString("Glob pattern")); cJSON_AddItemToObject(glob_props, "pattern", gpat_prop);
+    cJSON *gpat_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gpat_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gpat_prop, "description", cJSON_CreateString("REQUIRED: Glob pattern to match files, e.g. '*.go', '**/*.json'")); cJSON_AddItemToObject(glob_props, "pattern", gpat_prop);
+    cJSON *gpath_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gpath_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gpath_prop, "description", cJSON_CreateString("Directory to search in (default: .)")); cJSON_AddItemToObject(glob_props, "path", gpath_prop);
+    cJSON *gtype_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gtype_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gtype_prop, "description", cJSON_CreateString("Type filter: 'file' (default), 'dir', 'all'")); cJSON_AddItemToObject(glob_props, "type", gtype_prop);
+    cJSON *gres_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gres_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(gres_prop, "description", cJSON_CreateString("Maximum results to return (default: 100)")); cJSON_AddItemToObject(glob_props, "maxResults", gres_prop);
     cJSON_AddItemToObject(glob_schema, "properties", glob_props);
     cJSON *glob_required = cJSON_CreateArray(); cJSON_AddItemToArray(glob_required, cJSON_CreateString("pattern")); cJSON_AddItemToObject(glob_schema, "required", glob_required);
-    tool_register(reg, "Glob", "Find files matching pattern", glob_schema, tool_glob);
+    tool_register(reg, "Glob", "Search for files by glob pattern. Supports recursive matching (**) and type filtering.", glob_schema, tool_glob);
 
     // Shell tool
     cJSON *shell_schema = cJSON_CreateObject();
