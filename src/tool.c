@@ -3,12 +3,48 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include <setjmp.h>
+#include <signal.h>
 
 // Tool registry
 static int g_in_tool = 0;
 
 // Tool timeout flag (set to 1 to request cancellation)
 volatile LONG g_tool_timeout = 0;
+
+// Exception handling with setjmp/longjmp
+static jmp_buf g_crash_buf;
+static volatile int g_crashed = 0;
+
+// Store old handlers
+typedef void (*sig_handler_t)(int);
+static sig_handler_t g_old_sigabrt = NULL;
+static sig_handler_t g_old_sigfpe = NULL;
+static sig_handler_t g_old_sigsegv = NULL;
+
+// Crash handler - called from signal handlers
+static void tool_crash_handler(int sig) {
+    g_crashed = 1;
+    // Restore default handlers before longjmp
+    signal(SIGABRT, SIG_DFL);
+    signal(SIGFPE, SIG_DFL);
+    signal(SIGSEGV, SIG_DFL);
+    longjmp(g_crash_buf, 1);
+}
+
+// Begin crash protection - install signal handlers
+static void _begin_crash_protection(void) {
+    g_old_sigabrt = signal(SIGABRT, tool_crash_handler);
+    g_old_sigfpe = signal(SIGFPE, tool_crash_handler);
+    g_old_sigsegv = signal(SIGSEGV, tool_crash_handler);
+}
+
+// End crash protection - restore original handlers
+static void _end_crash_protection(void) {
+    if (g_old_sigabrt) signal(SIGABRT, g_old_sigabrt);
+    if (g_old_sigfpe) signal(SIGFPE, g_old_sigfpe);
+    if (g_old_sigsegv) signal(SIGSEGV, g_old_sigsegv);
+}
 
 ToolRegistry *tool_registry_new(void) {
     ToolRegistry *reg = calloc(1, sizeof(ToolRegistry));
@@ -85,21 +121,31 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
     }
     
     g_in_tool = 1;
+    g_crashed = 0;
     
     // Set up timeout
     DWORD start_tick = tool_get_tick_count();
     g_tool_timeout = 0;
     
+    // Install crash handlers
+    _begin_crash_protection();
+    
     char *result = NULL;
-    __try {
+    
+    // Set jump point for crash recovery
+    if (setjmp(g_crash_buf) == 0) {
+        // Normal execution
         result = tool->func(args, error);
-    }
-    __except(EXCEPTION_EXECUTE_HANDLER) {
+    } else {
+        // Crash recovered
         if (error && !*error) {
-            *error = strdup("tool crashed with exception");
+            *error = strdup("tool crashed and was recovered");
         }
         result = NULL;
     }
+    
+    // Remove crash handlers
+    _end_crash_protection();
     
     g_in_tool = 0;
     g_tool_timeout = 0;
@@ -110,10 +156,10 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
     DWORD elapsed = tool_get_tick_count() - start_tick;
     if (elapsed > TOOL_TIMEOUT_MS) {
         g_tool_timeout = 1;
+        if (result) { free(result); result = NULL; }
         if (error && !*error) {
             *error = strdup("tool execution timeout (>30s)");
         }
-        if (result) { free(result); result = NULL; }
     }
     
     return result;
