@@ -9,8 +9,13 @@ static const size_t GROWTH_FACTOR = 2;
 void buffer_init(Buffer *buf) {
     buf->data = malloc(INITIAL_CAPACITY);
     if (!buf->data) {
-        fprintf(stderr, "buffer_init: malloc failed\n");
-        exit(1);
+        buf->data = malloc(INITIAL_CAPACITY);  // retry once
+        if (!buf->data) {
+            buf->data = NULL;
+            buf->len = 0;
+            buf->capacity = 0;
+            return;
+        }
     }
     buf->data[0] = '\0';
     buf->len = 0;
@@ -39,8 +44,10 @@ void buffer_reserve(Buffer *buf, size_t capacity) {
         }
         char *new_data = realloc(buf->data, new_capacity);
         if (!new_data) {
-            fprintf(stderr, "buffer_reserve: realloc failed\n");
-            exit(1);
+            // Try smaller allocation
+            new_capacity = capacity;
+            new_data = realloc(buf->data, new_capacity);
+            if (!new_data) return;  // Fail gracefully
         }
         buf->data = new_data;
         buf->capacity = new_capacity;
@@ -48,11 +55,12 @@ void buffer_reserve(Buffer *buf, size_t capacity) {
 }
 
 void buffer_append(Buffer *buf, const char *data, size_t len) {
-    if (len == 0) return;
+    if (len == 0 || !buf || !buf->data || !data) return;
     
     size_t needed = buf->len + len + 1;
     if (needed > buf->capacity) {
         buffer_reserve(buf, needed);
+        if (needed > buf->capacity) return;  // Failed to allocate
     }
     
     memcpy(buf->data + buf->len, data, len);
@@ -61,6 +69,7 @@ void buffer_append(Buffer *buf, const char *data, size_t len) {
 }
 
 void buffer_append_str(Buffer *buf, const char *str) {
+    if (!str) return;
     buffer_append(buf, str, strlen(str));
 }
 
