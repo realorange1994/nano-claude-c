@@ -117,7 +117,18 @@ void history_add_tool_call(History *h, const char *tool_id, const char *tool_nam
 
 void history_add_tool_result(History *h, const char *parent_id, const char *tool_name, const char *tool_result) {
     if (h->count >= MAX_MESSAGES) return;
-    if (!tool_result) return;
+    if (!tool_result) {
+        // Handle NULL tool_result gracefully
+        Entry *e = &h->entries[h->count++];
+        memset(e, 0, sizeof(Entry));
+        e->type = ENTRY_TOOL_RESULT;
+        e->role = ROLE_TOOL;
+        if (parent_id) strncpy(e->parent_id, parent_id, sizeof(e->parent_id) - 1);
+        e->tool_name = tool_name ? strdup(tool_name) : NULL;
+        e->tool_result = strdup("[empty result]");
+        history_generate_id(e->id, sizeof(e->id));
+        return;
+    }
 
     Entry *e = &h->entries[h->count++];
     memset(e, 0, sizeof(Entry));
@@ -127,13 +138,13 @@ void history_add_tool_result(History *h, const char *parent_id, const char *tool
     e->tool_name = tool_name ? strdup(tool_name) : NULL;
 
     // Truncate tool result to prevent context overflow
-    // Use MAX_TOOL_RESULT_LEN characters + truncation suffix
     size_t result_len = strlen(tool_result);
     if (result_len > MAX_TOOL_RESULT_LEN) {
         char *truncated = malloc(MAX_TOOL_RESULT_LEN + 32);
         if (truncated) {
             memcpy(truncated, tool_result, MAX_TOOL_RESULT_LEN);
-            strcpy(truncated + MAX_TOOL_RESULT_LEN, "\n... [truncated] ...");
+            truncated[MAX_TOOL_RESULT_LEN] = '\0';
+            strcat(truncated, "\n... [truncated] ...");
         }
         e->tool_result = truncated ? truncated : strdup("[output too large]");
     } else {
