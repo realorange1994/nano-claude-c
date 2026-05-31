@@ -14,6 +14,10 @@ static char *restore_line_endings(const char *text, int use_crlf);
 static int fuzzy_find_text(const char *content, const char *search);
 static double eval_expr(const char *expr);
 
+// LCS-based diff generation for EditDiff
+static char **compute_lcs(const char **a, int a_len, const char **b, int b_len, int *lcs_len);
+static char *generate_unified_diff(const char *filename, const char *old_content, const char *new_content, int context_lines);
+
 // ============== Shell Security: Deny Patterns ==============
 static const char *g_deny_patterns[] = {
     "\\brm\\s+-[rf]{1,2}\\b",
@@ -476,12 +480,18 @@ char *tool_edit_file(cJSON *input, char **error) {
     fwrite(new_content, 1, strlen(new_content), f);
     fclose(f);
     
+    // Generate unified diff for display (with 10 lines of context)
+    char *diff = generate_unified_diff(path->valuestring, file_content, new_content, 10);
+    
     free(content);
     free(normalized);
     free(normalized_old);
     free(normalized_new);
     free(new_content);
     
+    if (diff) {
+        return diff;
+    }
     return strdup("File edited successfully");
 }
 
@@ -1043,5 +1053,236 @@ static double eval_expr(const char *expr) {
             break;
     }
     
+    return result;
+}
+
+// ============================================================================
+// EditDiff: Unified diff generation for file edits
+// ============================================================================
+
+// Split content into lines (preserving trailing newlines)
+static char **split_lines(const char *content, int *count) {
+    if (!content) {
+        *count = 0;
+        return NULL;
+    }
+    
+    int capacity = 64;
+    char **lines = malloc(capacity * sizeof(char*));
+    if (!lines) return NULL;
+    
+    int len = strlen(content);
+    int line_count = 0;
+    int start = 0;
+    
+    for (int i = 0; i <= len; i++) {
+        if (i == len || content[i] == '\n') {
+            int line_len = i - start;
+            if (line_len > 0 && content[start + line_len - 1] == '\r') {
+                line_len--;
+            }
+            
+            char *line = malloc(line_len + 1);
+            if (!line) {
+                for (int j = 0; j < line_count; j++) free(lines[j]);
+                free(lines);
+                return NULL;
+            }
+            memcpy(line, content + start, line_len);
+            line[line_len] = '\0';
+            
+            if (line_count >= capacity) {
+                capacity *= 2;
+                char **new_lines = realloc(lines, capacity * sizeof(char*));
+                if (!new_lines) {
+                    free(line);
+                    for (int j = 0; j < line_count; j++) free(lines[j]);
+                    free(lines);
+                    return NULL;
+                }
+                lines = new_lines;
+            }
+            lines[line_count++] = line;
+            start = i + 1;
+        }
+    }
+    
+    *count = line_count;
+    return lines;
+}
+
+// Compute LCS (Longest Common Subsequence)
+static char **compute_lcs(const char **a, int a_len, const char **b, int b_len, int *lcs_len) {
+    if (a_len == 0 || b_len == 0) {
+        *lcs_len = 0;
+        return NULL;
+    }
+    
+    int **dp = malloc((a_len + 1) * sizeof(int*));
+    for (int i = 0; i <= a_len; i++) {
+        dp[i] = calloc(b_len + 1, sizeof(int));
+    }
+    
+    for (int i = 1; i <= a_len; i++) {
+        for (int j = 1; j <= b_len; j++) {
+            if (strcmp(a[i-1], b[j-1]) == 0) {
+                dp[i][j] = dp[i-1][j-1] + 1;
+            } else {
+                dp[i][j] = dp[i-1][j] > dp[i][j-1] ? dp[i-1][j] : dp[i][j-1];
+            }
+        }
+    }
+    
+    int lcs_max = dp[a_len][b_len];
+    char **lcs = malloc(lcs_max * sizeof(char*));
+    int lcs_count = 0;
+    
+    int i = a_len, j = b_len;
+    while (i > 0 && j > 0) {
+        if (strcmp(a[i-1], b[j-1]) == 0) {
+            lcs[lcs_count++] = strdup(a[i-1]);
+            i--; j--;
+        } else if (dp[i-1][j] > dp[i][j-1]) {
+            i--;
+        } else {
+            j--;
+        }
+    }
+    
+    for (int k = 0; k < lcs_count / 2; k++) {
+        char *tmp = lcs[k];
+        lcs[k] = lcs[lcs_count - 1 - k];
+        lcs[lcs_count - 1 - k] = tmp;
+    }
+    
+    for (i = 0; i <= a_len; i++) free(dp[i]);
+    free(dp);
+    
+    *lcs_len = lcs_count;
+    return lcs;
+}
+
+// Generate unified diff with specified context lines (max 10)
+static char *generate_unified_diff(const char *filename, const char *old_content, const char *new_content, int context_lines) {
+    Buffer buf;
+    buffer_init(&buf);
+    
+    int old_count, new_count;
+    char **old_lines = split_lines(old_content, &old_count);
+    char **new_lines = split_lines(new_content, &new_count);
+    
+    if (!old_lines && !new_lines) {
+        buffer_free(&buf);
+        return strdup("");
+    }
+    
+    int lcs_len;
+    char **lcs = compute_lcs((const char**)old_lines, old_count, (const char**)new_lines, new_count, &lcs_len);
+    
+    char header[512];
+    snprintf(header, sizeof(header), "diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n", 
+             filename, filename, filename, filename);
+    buffer_append_str(&buf, header);
+    
+    int oi = 0, ni = 0, li = 0;
+    
+    while (oi < old_count || ni < new_count) {
+        // Skip unchanged lines
+        while (oi < old_count && ni < new_count && li < lcs_len &&
+               strcmp(old_lines[oi], lcs[li]) == 0) {
+            oi++; ni++; li++;
+        }
+        
+        if (oi >= old_count && ni >= new_count) break;
+        
+        // Count context before changes
+        int context_before = 0;
+        int temp_oi = oi, temp_ni = ni, temp_li = li;
+        while (context_before < context_lines && temp_oi > 0 && temp_ni > 0 && 
+               temp_li > 0 && strcmp(old_lines[temp_oi-1], lcs[temp_li-1]) == 0) {
+            context_before++;
+            temp_oi--; temp_ni--; temp_li--;
+        }
+        
+        int hunk_old_start = oi - context_before + 1;
+        int hunk_new_start = ni - context_before + 1;
+        
+        Buffer hunk;
+        buffer_init(&hunk);
+        
+        // Add context before
+        for (int c = 0; c < context_before; c++) {
+            char *line = old_lines[oi - context_before + c];
+            buffer_append_str(&hunk, " ");
+            buffer_append_str(&hunk, line);
+            buffer_append(&hunk, "\n", 1);
+        }
+        
+        int changes_started = 0;
+        int trailing_context = 0;
+        int hunk_old_count = 0, hunk_new_count = 0;
+        
+        while (oi < old_count || ni < new_count) {
+            if (li < lcs_len && oi < old_count && ni < new_count &&
+                strcmp(old_lines[oi], lcs[li]) == 0 && strcmp(new_lines[ni], lcs[li]) == 0) {
+                if (changes_started) {
+                    trailing_context++;
+                    if (trailing_context > context_lines) break;
+                }
+                buffer_append_str(&hunk, " ");
+                buffer_append_str(&hunk, old_lines[oi]);
+                buffer_append(&hunk, "\n", 1);
+                hunk_old_count++;
+                hunk_new_count++;
+                oi++; ni++; li++;
+            } else if (oi < old_count && (li >= lcs_len || strcmp(old_lines[oi], lcs[li]) != 0)) {
+                changes_started = 1;
+                trailing_context = 0;
+                buffer_append_str(&hunk, "-");
+                buffer_append_str(&hunk, old_lines[oi]);
+                buffer_append(&hunk, "\n", 1);
+                hunk_old_count++;
+                oi++;
+            } else if (ni < new_count && (li >= lcs_len || strcmp(new_lines[ni], lcs[li]) != 0)) {
+                changes_started = 1;
+                trailing_context = 0;
+                buffer_append_str(&hunk, "+");
+                buffer_append_str(&hunk, new_lines[ni]);
+                buffer_append(&hunk, "\n", 1);
+                hunk_new_count++;
+                ni++;
+            } else {
+                break;
+            }
+        }
+        
+        if (changes_started) {
+            if (hunk_old_count == 0) hunk_old_count = 1;
+            if (hunk_new_count == 0) hunk_new_count = 1;
+            
+            char hunk_header[128];
+            snprintf(hunk_header, sizeof(hunk_header), "@@ -%d,%d +%d,%d @@\n",
+                    hunk_old_start, hunk_old_count, hunk_new_start, hunk_new_count);
+            buffer_append_str(&buf, hunk_header);
+            buffer_append_str(&buf, buffer_c_str(&hunk));
+        }
+        buffer_free(&hunk);
+    }
+    
+    if (lcs) {
+        for (int i = 0; i < lcs_len; i++) free(lcs[i]);
+        free(lcs);
+    }
+    if (old_lines) {
+        for (int i = 0; i < old_count; i++) free(old_lines[i]);
+        free(old_lines);
+    }
+    if (new_lines) {
+        for (int i = 0; i < new_count; i++) free(new_lines[i]);
+        free(new_lines);
+    }
+    
+    char *result = strdup(buffer_c_str(&buf));
+    buffer_free(&buf);
     return result;
 }

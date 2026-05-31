@@ -318,13 +318,22 @@ bool http_post_stream(const char *url, const char *headers, const char *body,
         // Append new data to line buffer
         size_t new_len = line_buf_len + bytes_read;
         if (new_len + 1 > line_buf_cap) {
-            line_buf_cap = (new_len + 1) * 2;
-            char *new_buf = realloc(line_buf, line_buf_cap);
+            size_t new_cap = (new_len + 1) * 2;
+            char *new_buf = realloc(line_buf, new_cap);
             if (new_buf) {
                 line_buf = new_buf;
+                line_buf_cap = new_cap;
             } else {
-                // Allocation failed - return what we have
-                free(line_buf);
+                // Allocation failed - don't free line_buf here, let caller clean up
+                // Mark that we failed so caller knows
+                fprintf(stderr, "[DEBUG][http_post_stream] Memory allocation failed\n");
+                fflush(stderr);
+                // Return false but DON'T free line_buf - let caller clean it up
+                // Signal failure by setting a flag
+                line_buf_cap = 0;  // Mark as invalid
+                WinHttpCloseHandle(hRequest);
+                WinHttpCloseHandle(hConnect);
+                WinHttpCloseHandle(hSession);
                 return false;
             }
         }
