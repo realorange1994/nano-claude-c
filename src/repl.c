@@ -1310,7 +1310,7 @@ int repl_run(REPL *repl) {
 
                                     repl->pending_tool_names[i], result);
 
-                    printf("%s\n", result);
+                    fwrite(result, 1, strlen(result), stdout); putchar(10);
 
                     free(result);
 
@@ -1320,7 +1320,7 @@ int repl_run(REPL *repl) {
 
                                     repl->pending_tool_names[i], error);
 
-                    printf("Error: %s\n", error);
+                    fwrite(error, 1, strlen(error), stdout); putchar(10);
 
                     free(error);
 
