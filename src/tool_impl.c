@@ -317,8 +317,8 @@ static char **split_text_lines_safe(const char *text, int *count) {
     return split_text_lines(text, count);
 }
 
-// Max file content size (5MB)
-#define MAX_FILE_CONTENT (5 * 1024 * 1024)
+// Max lines per read
+#define MAX_READ_LINES 500
 
 char *tool_read_file(cJSON *input, char **error) {
     cJSON *path = cJSON_GetObjectItem(input, "path");
@@ -331,7 +331,7 @@ char *tool_read_file(cJSON *input, char **error) {
     cJSON *limit = cJSON_GetObjectItem(input, "limit");
     
     int line_offset = 0;
-    int line_limit = 500; // default
+    int line_limit = MAX_READ_LINES;
     
     if (offset && offset->type == cJSON_Number) {
         int val = (int)offset->valuedouble;
@@ -342,103 +342,61 @@ char *tool_read_file(cJSON *input, char **error) {
         line_offset = val - 1;
     }
     if (limit && limit->type == cJSON_Number) {
-        line_limit = (int)limit->valuedouble;
-        if (line_limit <= 0) line_limit = 500;
-        if (line_limit > 1000) line_limit = 1000; // cap at 1000
+        int val = (int)limit->valuedouble;
+        if (val > 0 && val < MAX_READ_LINES) line_limit = val;
     }
     
-    FILE *f = fopen(path->valuestring, "rb"); // Use regular fopen instead of utf8_fopen
+    FILE *f = fopen(path->valuestring, "r");
     if (!f) {
         *error = strdup("failed to open file");
         return NULL;
     }
     
-    // Read file content with size limit
-    char *file_content = malloc(MAX_FILE_CONTENT + 1);
-    if (!file_content) {
-        fclose(f);
-        *error = strdup("memory allocation failed");
-        return NULL;
+    // Read lines using fgets (safer than loading entire file)
+    Buffer lines_buf;
+    buffer_init(&lines_buf);
+    
+    char line[4096];
+    int total_file_lines = 0;
+    int lines_read = 0;
+    
+    // First pass: count total lines and read requested lines
+    while (fgets(line, sizeof(line), f)) {
+        total_file_lines++;
+        
+        // Skip lines before offset
+        if (total_file_lines <= line_offset) continue;
+        if (lines_read >= line_limit) continue;
+        
+        // Remove trailing newline
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+            line[--len] = '\0';
+        }
+        
+        // Add line
+        buffer_append_str(&lines_buf, line);
+        buffer_append_str(&lines_buf, "\n");
+        lines_read++;
     }
     
-    size_t total_read = 0;
-    size_t chunk;
-    while (total_read < MAX_FILE_CONTENT && (chunk = fread(file_content + total_read, 1, 65536, f)) > 0) {
-        total_read += chunk;
-    }
-    file_content[total_read] = '\0';
     fclose(f);
     
-    // Check if file was truncated
-    int truncated = 0;
-    if (total_read >= MAX_FILE_CONTENT) {
-        truncated = 1;
-    }
+    char *result = buffer_c_str(&lines_buf);
+    buffer_free(&lines_buf);
     
-    // Strip UTF-8 BOM if present
-    char *content = file_content;
-    if (total_read >= 3 && (unsigned char)file_content[0] == 0xEF && 
-        (unsigned char)file_content[1] == 0xBB && (unsigned char)file_content[2] == 0xBF) {
-        content = file_content + 3;
-    }
-    
-    // Split into lines with limit
-    int total_lines = 0;
-    char **all_lines = split_text_lines_safe(content, &total_lines);
-    free(file_content);
-    
-    if (!all_lines) {
-        *error = strdup("failed to process file");
-        return NULL;
-    }
-    
-    // Check offset bounds
-    if (line_offset >= total_lines) {
-        for (int i = 0; i < total_lines; i++) free(all_lines[i]);
-        free(all_lines);
-        *error = strdup("offset is beyond end of file");
-        return NULL;
-    }
-    
-    int start_line = line_offset;
-    int remaining = total_lines - start_line;
-    int count = line_limit < remaining ? line_limit : remaining;
-    
-    // Build result
-    Buffer result_buf;
-    buffer_init(&result_buf);
-    
-    for (int i = 0; i < count; i++) {
-        if (i > 0) buffer_append_str(&result_buf, "\n");
-        if (all_lines[start_line + i]) {
-            buffer_append_str(&result_buf, all_lines[start_line + i]);
-        }
-    }
-    
-    char *result = buffer_c_str(&result_buf);
-    buffer_free(&result_buf);
-    
-    // Free lines
-    for (int i = 0; i < total_lines; i++) free(all_lines[i]);
-    free(all_lines);
-    
-    // Build output with pagination info
+    // Build output with pagination
     Buffer out_buf;
     buffer_init(&out_buf);
     buffer_append_str(&out_buf, result);
     free(result);
     
-    int next_offset = start_line + count;
-    int more_lines = total_lines - next_offset;
+    int more_lines = total_file_lines - (line_offset + lines_read);
     
-    if (more_lines > 0 || truncated) {
+    if (more_lines > 0) {
         char suffix[256];
-        if (more_lines > 0) {
-            snprintf(suffix, sizeof(suffix), "\n\n[%d more lines in file. Use offset=%d to continue.]", 
-                     more_lines, next_offset + 1);
-        } else {
-            snprintf(suffix, sizeof(suffix), "\n\n[File truncated (>%d lines or >5MB).]", MAX_READ_LINES);
-        }
+        snprintf(suffix, sizeof(suffix), "\n\n[%d more lines in file. Use offset=%d to continue.]",
+                 more_lines, line_offset + lines_read + 1);
         buffer_append_str(&out_buf, suffix);
     }
     
