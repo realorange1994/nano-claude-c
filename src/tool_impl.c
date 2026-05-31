@@ -181,6 +181,48 @@ static char *convert_gbk_to_utf8(const char *input) {
     free(wbuf);
     return result ? result : strdup(input);
 }
+
+// Strip ANSI terminal escape codes (colors, cursor movement, etc.)
+static char *strip_ansi_codes(const char *input) {
+    if (!input) return NULL;
+    
+    // Pre-allocate with same size, worst case
+    char *result = malloc(strlen(input) + 1);
+    if (!result) return NULL;
+    
+    const char *src = input;
+    char *dest = result;
+    
+    while (*src) {
+        if (*src == '\x1B' || *src == '\033') {
+            // Start of escape sequence
+            if (src[1] == '[') {
+                // CSI sequence
+                src += 2;
+                // Skip until we find a letter (end of sequence)
+                while (*src && !((*src >= 'A' && *src <= 'Z') || (*src >= 'a' && *src <= 'z'))) {
+                    src++;
+                }
+                if (*src) src++; // Skip the final letter
+            } else if (src[1] == ']') {
+                // OSC sequence (like \x1B]0;...\x07 or \x1B]0;...\x9C)
+                src += 2;
+                while (*src && *src != '\x07' && *src != '\x9C') {
+                    src++;
+                }
+                if (*src) src++; // Skip \x07 or \x9C
+            } else {
+                // Other escape sequence
+                src++;
+            }
+        } else {
+            *dest++ = *src++;
+        }
+    }
+    *dest = '\0';
+    
+    return result;
+}
 #include <math.h>
 #include <windows.h>
 #include <io.h>
@@ -888,6 +930,7 @@ char *tool_exec(cJSON *input, char **error) {
     cJSON *cmd = cJSON_GetObjectItem(input, "command");
     cJSON *cwd = cJSON_GetObjectItem(input, "cwd");
     cJSON *timeout = cJSON_GetObjectItem(input, "timeout");
+    cJSON *env_obj = cJSON_GetObjectItem(input, "env");
 
     if (!cmd || !cmd->valuestring) {
         *error = strdup("missing command parameter");
@@ -909,26 +952,6 @@ char *tool_exec(cJSON *input, char **error) {
         return NULL;
     }
 
-    // Escape single quotes in command for bash -c '...'
-    int cmdlen = strlen(command);
-    char *escaped = malloc(cmdlen * 4 + 1);
-    if (!escaped) {
-        *error = strdup("out of memory");
-        return NULL;
-    }
-    int j = 0;
-    for (int i = 0; i < cmdlen; i++) {
-        if (command[i] == '\'') {
-            escaped[j++] = '\'';
-            escaped[j++] = '\\';
-            escaped[j++] = '\'';
-            escaped[j++] = '\'';
-        } else {
-            escaped[j++] = command[i];
-        }
-    }
-    escaped[j] = '\0';
-
     // Find bash executable
     const char *bash_paths[] = {
         "E:/Git/bin/bash.exe",
@@ -946,9 +969,160 @@ char *tool_exec(cJSON *input, char **error) {
         }
     }
     if (!bash_exe) {
-        free(escaped);
         *error = strdup("bash not found for command execution");
         return NULL;
+    }
+
+    // Build environment block
+    char *env_block = NULL;
+    if (env_obj && env_obj->type == cJSON_Object) {
+        // Count existing env vars
+        char **env_vars = NULL;
+        int env_count = 0;
+        
+        // Get current environment
+        char *env_str = GetEnvironmentStringsA();
+        if (env_str) {
+            char *p = env_str;
+            while (*p) {
+                env_count++;
+                p += strlen(p) + 1;
+            }
+        }
+        
+        // Allocate array for env vars
+        env_vars = calloc(env_count + cJSON_GetArraySize(env_obj) + 2, sizeof(char*));
+        int idx = 0;
+        
+        // Copy existing environment
+        if (env_str) {
+            char *p = env_str;
+            while (*p) {
+                env_vars[idx++] = p;
+                p += strlen(p) + 1;
+            }
+        }
+        
+        // Add/override with provided env vars
+        cJSON *item;
+        cJSON_ArrayForEach(item, env_obj) {
+            const char *key = item->string;
+            char *val = item->valuestring;
+            if (key && val) {
+                size_t len = strlen(key) + strlen(val) + 2;
+                char *new_var = malloc(len);
+                if (new_var) {
+                    sprintf(new_var, "%s=%s", key, val);
+                    env_vars[idx++] = new_var;
+                }
+            }
+        }
+        env_vars[idx++] = NULL;  // End marker
+        
+        // Convert to environment block (double-null terminated)
+        size_t total_len = 0;
+        for (int i = 0; env_vars[i]; i++) {
+            total_len += strlen(env_vars[i]) + 1;
+        }
+        total_len += 1;  // Final null
+        
+        env_block = malloc(total_len);
+        if (env_block) {
+            char *dest = env_block;
+            for (int i = 0; env_vars[i]; i++) {
+                strcpy(dest, env_vars[i]);
+                dest += strlen(env_vars[i]);
+                *dest++ = '=';
+            }
+            *dest = '\0';
+        }
+        
+        // Clean up temp allocations
+        if (env_str) FreeEnvironmentStringsA(env_str);
+        
+        // Note: env_vars contains pointers to original strings, 
+        // so we only free the new allocations
+        cJSON *item2;
+        cJSON_ArrayForEach(item2, env_obj) {
+            // No-op, strings are in env_block
+        }
+        free(env_vars);
+    }
+
+    // Escape command for bash -c '...'
+    int cmdlen = strlen(command);
+    char *escaped = malloc(cmdlen * 4 + 1);
+    if (!escaped) {
+        free(env_block);
+        *error = strdup("out of memory");
+        return NULL;
+    }
+    int j = 0;
+    for (int i = 0; i < cmdlen; i++) {
+        if (command[i] == '\'') {
+            escaped[j++] = '\'';
+            escaped[j++] = '\\';
+            escaped[j++] = '\'';
+            escaped[j++] = '\'';
+        } else {
+            escaped[j++] = command[i];
+        }
+    }
+    escaped[j] = '\0';
+
+    // Get Windows temp dir for /tmp/ rewrite
+    char win_temp[MAX_PATH];
+    DWORD temp_len = GetTempPathA(sizeof(win_temp), win_temp);
+    if (temp_len == 0 || temp_len >= sizeof(win_temp)) {
+        strcpy(win_temp, "C:\\Windows\\Temp");
+    }
+    // Remove trailing backslash
+    if (win_temp[strlen(win_temp) - 1] == '\\') {
+        win_temp[strlen(win_temp) - 1] = '\0';
+    }
+    
+    // Convert Windows temp to POSIX path
+    char bash_temp[MAX_PATH];
+    int ti = 0;
+    for (int ci = 0; win_temp[ci] && ti < (int)(sizeof(bash_temp) - 1); ci++) {
+        if (win_temp[ci] == '\\') {
+            bash_temp[ti++] = '/';
+        } else if (win_temp[ci] == ':') {
+            // Skip drive letter colon, will handle in next char
+        } else if (isalpha((unsigned char)win_temp[ci]) && ci == 0) {
+            // Drive letter: C: -> /c
+            bash_temp[ti++] = '/';
+            bash_temp[ti++] = tolower((unsigned char)win_temp[ci]);
+        } else {
+            bash_temp[ti++] = tolower((unsigned char)win_temp[ci]);
+        }
+    }
+    bash_temp[ti] = '\0';
+
+    // Build command with /tmp/ rewrite
+    char *final_cmd;
+    if (strstr(escaped, "/tmp/") != NULL) {
+        // Replace /tmp/ with bash_temp path
+        size_t final_len = strlen(escaped) * 2 + strlen(bash_temp) + 10;
+        final_cmd = malloc(final_len);
+        if (final_cmd) {
+            char *dest = final_cmd;
+            const char *src = escaped;
+            while (*src) {
+                if (strncmp(src, "/tmp/", 5) == 0) {
+                    strcpy(dest, bash_temp);
+                    dest += strlen(bash_temp);
+                    src += 5;
+                } else {
+                    *dest++ = *src++;
+                }
+            }
+            *dest = '\0';
+        } else {
+            final_cmd = escaped;
+        }
+    } else {
+        final_cmd = escaped;
     }
 
     // Build command line: "bash" -c 'command' or with cd prefix
@@ -969,10 +1143,12 @@ char *tool_exec(cJSON *input, char **error) {
             }
         }
         posix_dir[pi] = '\0';
-        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c 'cd %s && %s'", bash_exe, posix_dir, escaped);
+        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c 'cd %s && %s'", bash_exe, posix_dir, final_cmd);
     } else {
-        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c '%s'", bash_exe, escaped);
+        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c '%s'", bash_exe, final_cmd);
     }
+    
+    if (final_cmd != escaped) free(final_cmd);
     free(escaped);
 
     // Create pipes for stdout and stderr
@@ -1012,14 +1188,16 @@ char *tool_exec(cJSON *input, char **error) {
 
     if (!CreateProcessA(NULL, cmd_line, NULL, NULL, TRUE,
                         CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
-                        NULL, work_dir, &si, &pi)) {
+                        env_block, work_dir, &si, &pi)) {
         CloseHandle(hReadOut);
         CloseHandle(hWriteOut);
         CloseHandle(hReadErr);
         CloseHandle(hWriteErr);
+        free(env_block);
         *error = strdup("failed to create process");
         return NULL;
     }
+    free(env_block);
 
     CloseHandle(hWriteOut);  // Close write end in parent (stdout)
     CloseHandle(hWriteErr);  // Close write end in parent (stderr)
@@ -1131,13 +1309,19 @@ char *tool_exec(cJSON *input, char **error) {
     char *result = buffer_c_str(&buf);
     char *utf8_result = convert_gbk_to_utf8(result);
     buffer_free(&buf);
+    
+    // Strip ANSI terminal codes
+    char *clean_result = strip_ansi_codes(utf8_result);
+    free(utf8_result);
+    utf8_result = clean_result;
 
     // Append exit code if not 0
     char *final_result;
+    size_t result_len = utf8_result ? strlen(utf8_result) : 0;
     if (exitCode != 0) {
-        final_result = malloc(strlen(utf8_result) + 64);
+        final_result = malloc(result_len + 64);
         if (final_result) {
-            snprintf(final_result, strlen(utf8_result) + 64, "%s\nExit code: %lu", utf8_result, (unsigned long)exitCode);
+            snprintf(final_result, result_len + 64, "%s\nExit code: %lu", utf8_result, (unsigned long)exitCode);
             free(utf8_result);
             return final_result;
         }
