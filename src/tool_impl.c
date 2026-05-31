@@ -1,6 +1,7 @@
 #include "tool.h"
 #include "rgrep.h"
 #include "glob.h"
+#include "calc.h"
 #include "buffer.h"
 #include <stdlib.h>
 #include <string.h>
@@ -1338,85 +1339,9 @@ char *tool_calc(cJSON *input, char **error) {
         return NULL;
     }
     
-    double result = eval_expr(expr->valuestring);
+    double result = calc_evaluate(expr->valuestring, error);
     
-    char *str = malloc(64);
-    if (!str) {
-        *error = strdup("memory allocation failed");
-        return NULL;
-    }
-    
-    // Check for special values
-    if (isnan(result)) {
-        strcpy(str, "NaN");
-    } else if (isinf(result)) {
-        strcpy(str, result > 0 ? "Infinity" : "-Infinity");
-    } else {
-        snprintf(str, 64, "%.10g", result);
-    }
-    
-    return str;
-}
-
-// Simple expression evaluator with basic math operations
-static double eval_expr(const char *expr) {
-    double result = 0;
-    double current = 0;
-    char op = '+';
-    const char *p = expr;
-    
-    while (*p) {
-        // Skip whitespace
-        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
-            p++;
-            continue;
-        }
-        
-        // Handle operators
-        if (*p == '+' || *p == '-' || *p == '*' || *p == '/' || *p == '^' || *p == '%') {
-            // Apply previous operator
-            switch (op) {
-                case '+': result += current; break;
-                case '-': result -= current; break;
-                case '*': result *= current; break;
-                case '/': 
-                    if (current != 0) result /= current; 
-                    else return NAN;
-                    break;
-                case '^': result = pow(result, current); break;
-                case '%': 
-                    if (current != 0) result = fmod(result, current);
-                    else return NAN;
-                    break;
-            }
-            op = *p;
-            current = 0;
-        } else {
-            // Parse number
-            char *end;
-            current = strtod(p, &end);
-            p = end - 1;
-        }
-        p++;
-    }
-    
-    // Apply final operator
-    switch (op) {
-        case '+': result += current; break;
-        case '-': result -= current; break;
-        case '*': result *= current; break;
-        case '/': 
-            if (current != 0) result /= current; 
-            else return NAN;
-            break;
-        case '^': result = pow(result, current); break;
-        case '%': 
-            if (current != 0) result = fmod(result, current);
-            else return NAN;
-            break;
-    }
-    
-    return result;
+    return calc_format_result(result);
 }
 
 // ============================================================================

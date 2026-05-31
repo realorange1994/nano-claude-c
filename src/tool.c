@@ -183,8 +183,8 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON *calc_schema = cJSON_CreateObject();
     cJSON_AddItemToObject(calc_schema, "type", cJSON_CreateString("object"));
     cJSON *calc_props = cJSON_CreateObject();
-    cJSON *expr_prop = cJSON_CreateObject(); cJSON_AddItemToObject(expr_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(expr_prop, "description", cJSON_CreateString("Math expression")); cJSON_AddItemToObject(calc_props, "expression", expr_prop);
+    cJSON *expr_prop = cJSON_CreateObject(); cJSON_AddItemToObject(expr_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(expr_prop, "description", cJSON_CreateString("REQUIRED: Math expression to evaluate (e.g., '2+2', 'sqrt(16)+cos(pi)', '(1+2)^3')")); cJSON_AddItemToObject(calc_props, "expression", expr_prop);
     cJSON_AddItemToObject(calc_schema, "properties", calc_props);
     cJSON *calc_required = cJSON_CreateArray(); cJSON_AddItemToArray(calc_required, cJSON_CreateString("expression")); cJSON_AddItemToObject(calc_schema, "required", calc_required);
-    tool_register(reg, "Calc", "Calculate expression", calc_schema, tool_calc);
+    tool_register(reg, "Calc", "Calculate a mathematical expression and return the result. Supports arithmetic (+, -, *, /, %), power (^), implicit multiplication (2(3), pi(3)), parentheses, variables (pi, e, phi, tau, inf, nan), and functions.", calc_schema, tool_calc);
 }
