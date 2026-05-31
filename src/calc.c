@@ -5,6 +5,11 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <math.h>
+#include <stdint.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 // Token types
 typedef enum {
@@ -142,7 +147,7 @@ static void token_free(Token *tok) {
 
 // Parser state
 typedef struct {
-    Lexer *lex;
+    Lexer lex;
     Token current;
     CalcContext *ctx;
 } Parser;

@@ -11,11 +11,9 @@
 #include <sys/time.h>
 #include <windows.h>
 
-// Forward declarations for functions defined later in the file
 static char *normalize_line_endings(const char *text);
 static char *restore_line_endings(const char *text, int use_crlf);
 static int fuzzy_find_text(const char *content, const char *search);
-static double eval_expr(const char *expr);
 
 // LCS-based diff generation for EditDiff
 static char **compute_lcs(const char **a, int a_len, const char **b, int b_len, int *lcs_len);
@@ -254,9 +252,6 @@ static FILE *utf8_fopen(const char *path, const char *mode) {
     free(w_mode);
     return f;
 }
-
-// Forward declaration for eval_expr
-static double eval_expr(const char *expr);
 
 // Escape string for JSON (reserved for future use)
 // static char *json_escape(const char *str) { ... }

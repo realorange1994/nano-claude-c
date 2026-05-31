@@ -214,13 +214,11 @@ static void walk_directory(const char *dir, GlobConfig *cfg, GlobResult *result)
         int is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         
         // Type filter
-        if (cfg->type_filter) {
-            if (strcmp(cfg->type_filter, "file") == 0 && is_dir) {
-                continue;
-            }
-            if (strcmp(cfg->type_filter, "dir") == 0 && !is_dir) {
-                continue;
-            }
+        if (cfg->type_filter == GLOB_TYPE_FILE && is_dir) {
+            continue;
+        }
+        if (cfg->type_filter == GLOB_TYPE_DIR && !is_dir) {
+            continue;
         }
         
         // Match pattern
@@ -325,13 +323,11 @@ GlobResult *glob_search(GlobConfig *cfg) {
                 
                 // Type filter
                 int is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-                if (cfg->type_filter) {
-                    if (strcmp(cfg->type_filter, "file") == 0 && is_dir) {
-                        continue;
-                    }
-                    if (strcmp(cfg->type_filter, "dir") == 0 && !is_dir) {
-                        continue;
-                    }
+                if (cfg->type_filter == GLOB_TYPE_FILE && is_dir) {
+                    continue;
+                }
+                if (cfg->type_filter == GLOB_TYPE_DIR && !is_dir) {
+                    continue;
                 }
                 
                 char full_path[MAX_PATH];
