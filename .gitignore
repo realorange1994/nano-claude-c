@@ -4,3 +4,4 @@
 *.bak
 obj/
 deps/cJSON.o
+deps/
