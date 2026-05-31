@@ -481,7 +481,7 @@ char *tool_edit_file(cJSON *input, char **error) {
     fclose(f);
     
     // Generate unified diff for display (with 10 lines of context)
-    char *diff = generate_unified_diff(path->valuestring, file_content, new_content, 10);
+    char *diff = generate_unified_diff(path->valuestring, file_content, new_content, 16);
     
     free(content);
     free(normalized);
