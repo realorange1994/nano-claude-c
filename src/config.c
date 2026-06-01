@@ -100,12 +100,6 @@ bool config_load(const char *path) {
         }
     }
     
-    if ((item = cJSON_GetObjectItem(root, "max_tokens"))) {
-        g_config.max_tokens = item->valueint;
-    } else {
-        g_config.max_tokens = 8192;
-    }
-    
     if ((item = cJSON_GetObjectItem(root, "context_window"))) {
         g_config.context_window = item->valueint;
     } else {

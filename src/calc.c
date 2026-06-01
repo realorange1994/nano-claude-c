@@ -41,12 +41,6 @@ typedef struct {
     size_t len;
 } Lexer;
 
-// Context for variables
-typedef struct {
-    double vars[8];
-    const char *var_names[8];
-} CalcContext;
-
 // Create lexer
 static void lexer_init(Lexer *lex, const char *expr) {
     lex->expr = expr;
@@ -190,13 +184,11 @@ static void token_free(Token *tok) {
 typedef struct {
     Lexer lex;
     Token current;
-    CalcContext *ctx;
 } Parser;
 
 // Init parser
-static void parser_init(Parser *p, const char *expr, CalcContext *ctx) {
+static void parser_init(Parser *p, const char *expr) {
     lexer_init(&p->lex, expr);
-    p->ctx = ctx;
     p->current = lexer_next_token(&p->lex);
 }
 
@@ -207,8 +199,7 @@ static void parser_next(Parser *p) {
 }
 
 // Get variable value
-static double get_var(const char *name, CalcContext *ctx) {
-    (void)ctx;
+static double get_var(const char *name) {
     if (strcmp(name, "pi") == 0) return M_PI;
     if (strcmp(name, "e") == 0) return 2.718281828459045;
     if (strcmp(name, "phi") == 0) return 1.618033988749895;
@@ -219,8 +210,7 @@ static double get_var(const char *name, CalcContext *ctx) {
 }
 
 // Evaluate function
-static double eval_func(const char *name, double *args, int n, CalcContext *ctx) {
-    (void)ctx;
+static double eval_func(const char *name, double *args, int n) {
     
     // Trigonometric
     if (strcmp(name, "sin") == 0 && n >= 1) return sin(args[0]);
@@ -374,12 +364,12 @@ static double parse_factor(Parser *p) {
             if (p->current.type == TOKEN_LPAREN) {
                 // Check if it's a known function by testing eval_func
                 double test_args[1] = {0};
-                double fn_result = eval_func(name, test_args, 0, p->ctx);
+                double fn_result = eval_func(name, test_args, 0);
                 
                 // If eval_func returns 0 with 0 args, it's not a function (or is a function that returns 0)
                 // We need a better way to check if it's a function...
                 // For now, check if it's a known variable first
-                double var_val = get_var(name, p->ctx);
+                double var_val = get_var(name);
                 int is_variable = (strcmp(name, "pi") == 0 || strcmp(name, "e") == 0 || 
                                    strcmp(name, "phi") == 0 || strcmp(name, "tau") == 0 ||
                                    strcmp(name, "inf") == 0 || strcmp(name, "nan") == 0);
@@ -412,11 +402,11 @@ static double parse_factor(Parser *p) {
                         return NAN;
                     }
                     parser_next(p);
-                    right = eval_func(name, args, n, p->ctx);
+                    right = eval_func(name, args, n);
                 }
             } else {
                 // Simple variable
-                right = get_var(name, p->ctx);
+                right = get_var(name);
             }
             free(name);
             left *= right;
@@ -478,7 +468,7 @@ static double parse_primary(Parser *p) {
         // Check for function call
         if (p->current.type == TOKEN_LPAREN) {
             // Check if it's a known variable (pi, e, phi, tau) followed by implicit multiplication
-            double var_val = get_var(name, p->ctx);
+            double var_val = get_var(name);
             int is_known_var = (strcmp(name, "pi") == 0 || strcmp(name, "e") == 0 || 
                                strcmp(name, "phi") == 0 || strcmp(name, "tau") == 0 ||
                                strcmp(name, "inf") == 0 || strcmp(name, "nan") == 0);
@@ -516,11 +506,11 @@ static double parse_primary(Parser *p) {
                 }
                 parser_next(p);  // consume )
                 
-                result = eval_func(name, args, n, p->ctx);
+                result = eval_func(name, args, n);
             }
         } else {
             // Variable
-            result = get_var(name, p->ctx);
+            result = get_var(name);
         }
         
         free(name);
@@ -548,10 +538,9 @@ double calc_evaluate(const char *expr, char **error) {
         return NAN;
     }
     
-    CalcContext ctx;
     Parser parser;
-    
-    parser_init(&parser, expr, &ctx);
+
+    parser_init(&parser, expr);
     
     double result = parse_expr(&parser);
     
@@ -584,18 +573,3 @@ char *calc_format_result(double result) {
     return str;
 }
 
-// Format result with error
-char *calc_format_result_with_error(double result, const char *error) {
-    char *str;
-    if (error) {
-        str = malloc(strlen(error) + 64);
-        if (str) {
-            char *result_str = calc_format_result(result);
-            snprintf(str, strlen(error) + 64, "%s (result: %s)", error, result_str);
-            free(result_str);
-        }
-    } else {
-        str = calc_format_result(result);
-    }
-    return str;
-}

@@ -130,7 +130,6 @@ void mcp_client_free(MCPClient *mcp) {
     free(mcp->name); free(mcp->command); free(mcp);
 }
 
-const char *mcp_client_name(MCPClient *mcp) { return mcp->name; }
 
 bool mcp_initialize(MCPClient *mcp) {
     if (!mcp || mcp->initialized) return true;
@@ -247,10 +246,6 @@ cJSON *mcp_call_tool(MCPClient *mcp, const char *tool_name, cJSON *arguments) {
     return NULL;
 }
 
-bool mcp_is_connected(MCPClient *mcp) {
-    if (!mcp || !mcp->initialized) return false;
-    return WaitForSingleObject(mcp->proc_info.hProcess, 0) == WAIT_TIMEOUT;
-}
 
 #else
 // ------ Linux: POSIX implementation ------
@@ -343,7 +338,6 @@ void mcp_client_free(MCPClient *mcp) {
     free(mcp->name); free(mcp->command); free(mcp);
 }
 
-const char *mcp_client_name(MCPClient *mcp) { return mcp->name; }
 
 bool mcp_initialize(MCPClient *mcp) {
     if (!mcp || mcp->initialized) return true;
@@ -456,8 +450,5 @@ cJSON *mcp_call_tool(MCPClient *mcp, const char *tool_name, cJSON *arguments) {
     return NULL;
 }
 
-bool mcp_is_connected(MCPClient *mcp) {
-    if (!mcp || !mcp->initialized) return false;
-    return waitpid(mcp->pid, NULL, WNOHANG) == 0;
-}
+
 #endif // !_WIN32

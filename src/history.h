@@ -45,7 +45,6 @@ typedef struct {
 typedef struct {
     Entry entries[MAX_MESSAGES];
     int count;
-    int total_tokens;
     char *summary;
     int reserve_tokens;
     int keep_recent_tokens;

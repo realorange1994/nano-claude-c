@@ -335,7 +335,6 @@ GlobResult *glob_search(GlobConfig *cfg) {
                 if (cfg->exclude_hidden && entry->d_name[0] == '.') continue;
 
                 char full_path[MAX_P];
-                int is_directory = is_dir(full_path) && snprintf(full_path, sizeof(full_path), "%s/%s", dir, entry->d_name) > 0;
                 snprintf(full_path, sizeof(full_path), "%s/%s", dir, entry->d_name);
 
                 if (cfg->type_filter == GLOB_TYPE_FILE && is_dir(full_path)) continue;

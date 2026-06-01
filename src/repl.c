@@ -58,18 +58,18 @@ static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
     return FALSE;
 }
 #else
-static DWORD get_ticks_ms(void) {
+static unsigned long get_ticks_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    return (DWORD)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
+    return (unsigned long)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
 }
 
 static void console_signal_handler(int sig) {
     if (sig == SIGINT) {
         if (!g_repl) return;
 
-        DWORD now = get_ticks_ms();
-        DWORD last = g_repl->last_interrupt_time;
+        unsigned long now = get_ticks_ms();
+        unsigned long last = g_repl->last_interrupt_time;
 
         // Double Ctrl+C within 1.5s -> exit immediately
         if (last > 0 && now - last < 1500) {
@@ -183,10 +183,6 @@ bool repl_is_cancelled(REPL *repl) {
     return repl && repl->cancelled;
 }
 
-void repl_console_ctrl_handler(REPL *repl) {
-    // Called from SetConsoleCtrlHandler - just set the flag
-    if (repl) repl->cancelled = 1;
-}
 
 // ============================================================================
 // Interruptible input reading (like miniclaude's readLineInterruptible)
@@ -385,11 +381,6 @@ static void stream_callback(const StreamChunk *chunk, void *userdata) {
             printf("\n");
             fflush(stdout);
             break;
-        case CHUNK_ERROR:
-            if (chunk->error) {
-                fprintf(stderr, "Error: %s\n", chunk->error);
-            }
-            break;
     }
 }
 
@@ -397,48 +388,11 @@ static void stream_callback(const StreamChunk *chunk, void *userdata) {
 // Compaction (like miniclaude's runCompaction)
 // ============================================================================
 
-static const char *SUMMARIZATION_PROMPT =
-"The messages above are a conversation to summarize. Create a structured context checkpoint summary.\n\n"
-"## Goal\n[What is the user trying to accomplish?]\n\n"
-"## Progress\n- [x] [Completed tasks]\n- [ ] [Current work]\n\n"
-"## Next Steps\n1. [Ordered list]\n\n"
-"## Critical Context\n- [Data, references]\n";
-
-static char *build_history_text(REPL *repl) {
-    char *buf = malloc(65536);
-    if (!buf) return NULL;
-    buf[0] = '\0';
-    int pos = 0;
-    int cap = 65536;
-
-    for (int i = 0; i < repl->history.count; i++) {
-        Entry *m = &repl->history.entries[i];
-        const char *role_str = m->role == ROLE_USER ? "user" : (m->role == ROLE_ASSISTANT ? "assistant" : "tool");
-        char *truncated = NULL;
-
-        if (m->tool_name) {
-            truncated = history_truncate_content(m->content ? m->content : "{}", 500);
-            pos += snprintf(buf + pos, cap - pos, "[ASSISTANT - Tool Call: %s]: %s\n",
-                           m->tool_name, truncated);
-        } else if (m->tool_result) {
-            truncated = history_truncate_content(m->tool_result, 500);
-            pos += snprintf(buf + pos, cap - pos, "[TOOL RESULT - %s]: %s\n",
-                           m->tool_name ? m->tool_name : "unknown", truncated);
-        } else {
-            truncated = history_truncate_content(m->content ? m->content : "", 1000);
-            pos += snprintf(buf + pos, cap - pos, "[%s]: %s\n", role_str, truncated);
-        }
-        free(truncated);
-        if (pos >= cap - 100) break;
-    }
-    return buf;
-}
-
 static char *repl_summarize_callback(const char *history_text) {
-    // Build prompt with file operations context
-    char *prompt = malloc(strlen(history_text) + strlen(SUMMARIZATION_PROMPT) + 200);
+    const char *prompt_template = history_get_summarization_prompt();
+    char *prompt = malloc(strlen(history_text) + strlen(prompt_template) + 200);
     if (!prompt) return NULL;
-    sprintf(prompt, "%s\n\n%s", SUMMARIZATION_PROMPT, history_text);
+    sprintf(prompt, "%s\n\n%s", prompt_template, history_text);
 
     cJSON *messages = cJSON_CreateArray();
     if (!messages) { free(prompt); return NULL; }
@@ -532,31 +486,6 @@ int repl_run(REPL *repl) {
 #else
     signal(SIGINT, console_signal_handler);
 #endif
-
-    // Check if stdin is a terminal
-    const char *test_mode = getenv("NANOCLAUDE_TEST");
-    if (!test_mode) {
-#ifdef _WIN32
-        HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
-        DWORD type = GetFileType(h);
-        if (0) { // disabled for testing
-            fprintf(stderr, "Error: stdin is not a terminal. This program requires interactive input.\n");
-            fprintf(stderr, "Run without pipes or redirects.\n");
-            g_repl = NULL;
-            SetConsoleCtrlHandler(console_ctrl_handler, FALSE);
-            return 1;
-        }
-#else
-        if (0) { // disabled for testing
-            if (!isatty(STDIN_FILENO)) {
-                fprintf(stderr, "Error: stdin is not a terminal. This program requires interactive input.\n");
-                fprintf(stderr, "Run without pipes or redirects.\n");
-                g_repl = NULL;
-                return 1;
-            }
-        }
-#endif
-    }
 
     printf("NanoClaude-C (Pure C AI Agent)\n");
     printf("Type '/help' for commands, '/quit' to exit, Ctrl+C to interrupt\n\n");
@@ -765,16 +694,3 @@ int repl_run(REPL *repl) {
 // Utility functions
 // ============================================================================
 
-char *repl_read_line(const char *prompt) {
-    char buf[4096];
-    printf("%s", prompt);
-    fflush(stdout);
-    if (fgets(buf, sizeof(buf), stdin) == NULL) return NULL;
-    size_t len = strlen(buf);
-    if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
-    return strdup(buf);
-}
-
-void repl_print(const char *str) { printf("%s", str); }
-
-void repl_print_error(const char *str) { fprintf(stderr, "%s", str); }

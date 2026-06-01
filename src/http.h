@@ -26,10 +26,5 @@ bool http_post_stream(const char *url, const char *headers, const char *body,
                       StreamCallback callback, void *userdata, int timeout_ms,
                       const volatile long *cancelled);
 
-// Synchronous GET
-char *http_get(const char *url, int timeout_ms);
-
-// Utility: parse SSE data line
-char *parse_sse_data(const char *line);
 
 #endif // HTTP_H

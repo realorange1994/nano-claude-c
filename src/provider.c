@@ -145,7 +145,6 @@ char *provider_chat_sync(Provider *p, cJSON *messages) {
 }
 
 typedef struct {
-    Provider *provider;
     ChunkCallback callback;
     void *userdata;
     // Tool call state
@@ -155,33 +154,9 @@ typedef struct {
     size_t tool_input_len;     // Current length of tool input
     size_t tool_input_cap;     // Capacity of tool input buffer
     int in_tool_use;
-    // Accumulated assistant text (for saving to history)
-    char *text_buf;
-    size_t text_len;
-    size_t text_cap;
 } StreamContext;
 
-static void stream_context_append_text(StreamContext *ctx, const char *text) {
-    size_t len = strlen(text);
-    size_t needed = ctx->text_len + len + 1;
-    if (needed > ctx->text_cap) {
-        ctx->text_cap = needed * 2;
-        char *new_buf = realloc(ctx->text_buf, ctx->text_cap);
-        if (!new_buf) {
-            ctx->text_cap = needed;
-            return;
-        }
-        ctx->text_buf = new_buf;
-    }
-    if (ctx->text_buf && ctx->text_cap > ctx->text_len + len) {
-        memcpy(ctx->text_buf + ctx->text_len, text, len);
-        ctx->text_len += len;
-        ctx->text_buf[ctx->text_len] = '\0';
-    }
-}
-
 static void stream_context_free(StreamContext *ctx) {
-    free(ctx->text_buf);
     free(ctx->tool_input_buf);
 }
 
@@ -300,8 +275,6 @@ static void stream_handle_text_delta(cJSON *delta, StreamContext *ctx) {
         chunk.content = strdup(text->valuestring);
         ctx->callback(&chunk, ctx->userdata);
         free(chunk.content);
-        // Accumulate for history
-        stream_context_append_text(ctx, text->valuestring);
     }
 }
 
@@ -499,7 +472,6 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
     if (!json_body) return false;
     
     StreamContext ctx;
-    ctx.provider = p;
     ctx.callback = callback;
     ctx.userdata = userdata;
     ctx.current_tool_name[0] = '\0';
@@ -508,9 +480,6 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
     ctx.tool_input_len = 0;
     ctx.tool_input_cap = 0;
     ctx.in_tool_use = 0;
-    ctx.text_buf = NULL;
-    ctx.text_len = 0;
-    ctx.text_cap = 0;
 
     bool success = http_post_stream(url, headers, json_body, stream_callback, &ctx, 120000, cancelled);
 

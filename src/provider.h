@@ -15,8 +15,7 @@ typedef struct Provider Provider;
 typedef enum {
     CHUNK_CONTENT,
     CHUNK_TOOL_CALL,
-    CHUNK_DONE,
-    CHUNK_ERROR
+    CHUNK_DONE
 } ChunkType;
 
 typedef struct {
@@ -26,7 +25,6 @@ typedef struct {
     char *tool_id;
     char *tool_input;  // JSON string
     char *stop_reason;
-    char *error;
 } StreamChunk;
 
 // Provider lifecycle

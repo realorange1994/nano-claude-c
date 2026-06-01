@@ -16,7 +16,6 @@ typedef struct {
     char api_key[256];
     char base_url[512];         // Custom API URL (optional)
     char model[128];
-    int max_tokens;
     int context_window;
     int reserve_tokens;
     int keep_recent_tokens;

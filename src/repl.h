@@ -11,7 +11,6 @@
 #include <windows.h>
 #else
 #include <sys/time.h>
-typedef unsigned long DWORD;
 #endif
 
 #define MAX_MCP_CLIENTS 16
@@ -36,7 +35,7 @@ typedef struct {
     // Ctrl+C / cancellation context (like miniclaude's context.Context)
     volatile long cancelled;       // Set to 1 when Ctrl+C pressed
     volatile long interrupt_count; // Number of rapid interrupts
-    DWORD last_interrupt_time;     // Timestamp of last Ctrl+C
+    unsigned long last_interrupt_time;  // Timestamp of last Ctrl+C
 } REPL;
 
 // Create/destroy REPL
@@ -56,19 +55,10 @@ bool repl_is_cancelled(REPL *repl);    // Check if cancelled (like ctx.Done())
 // Returns strdup'd line, or NULL on EOF/interrupt
 char *repl_read_line_interruptible(REPL *repl);
 
-// Ctrl+C handler callback
-// This is called from a signal context and must be async-signal-safe.
-void repl_console_ctrl_handler(REPL *repl);
-
 // Add MCP client (registers MCP tools into the tool registry)
 bool repl_add_mcp(REPL *repl, ToolRegistry *tools, const char *name, const char *command);
 
 // Run the REPL
 int repl_run(REPL *repl);
-
-// Utility
-char *repl_read_line(const char *prompt);
-void repl_print(const char *str);
-void repl_print_error(const char *str);
 
 #endif // REPL_H
