@@ -6,6 +6,9 @@
 #include <process.h>
 #include <windows.h>
 
+// MCP timeout in milliseconds
+#define MCP_TIMEOUT_MS 30000
+
 struct MCPClient {
     char *name;
     char *command;
@@ -20,6 +23,76 @@ static int next_id(MCPClient *mcp) {
     return mcp->next_id++;
 }
 
+// Read response with timeout
+static char *read_response_with_timeout(MCPClient *mcp) {
+    Buffer buf;
+    buffer_init(&buf);
+    
+    DWORD start_time = GetTickCount();
+    char chunk[4096];
+    DWORD bytes_read;
+    
+    while (GetTickCount() - start_time < MCP_TIMEOUT_MS) {
+        // Check if process is still alive
+        if (WaitForSingleObject(mcp->proc_info.hProcess, 0) != WAIT_TIMEOUT) {
+            buffer_free(&buf);
+            return NULL;  // Process died
+        }
+        
+        // Try to read with small timeout
+        DWORD avail = 0;
+        if (!PeekNamedPipe(mcp->stdout_fd, NULL, 0, NULL, &avail, NULL) || avail == 0) {
+            Sleep(10);  // No data, wait a bit
+            continue;
+        }
+        
+        if (ReadFile(mcp->stdout_fd, chunk, sizeof(chunk) - 1, &bytes_read, NULL) && bytes_read > 0) {
+            chunk[bytes_read] = '\0';
+            buffer_append(&buf, chunk, bytes_read);
+            
+            // Check if we have complete JSON (look for newline or complete object)
+            char *str = buffer_c_str(&buf);
+            
+            // Strip "data: " prefix if present
+            if (strncmp(str, "data: ", 6) == 0) {
+                memmove(str, str + 6, strlen(str + 6) + 1);
+            }
+            
+            // Try to parse JSON
+            cJSON *resp = cJSON_Parse(str);
+            if (resp) {
+                char *result = cJSON_Print(resp);
+                cJSON_Delete(resp);
+                buffer_free(&buf);
+                return result;
+            }
+            
+            // Check if we have complete JSON object (even if partial parsing fails)
+            // Look for balanced braces
+            int brace_count = 0;
+            for (size_t i = 0; i < strlen(str); i++) {
+                if (str[i] == '{') brace_count++;
+                else if (str[i] == '}') brace_count--;
+                if (brace_count == 0 && i > 0) {
+                    // Complete JSON object found
+                    char *complete = malloc(i + 2);
+                    if (complete) {
+                        strncpy(complete, str, i + 1);
+                        complete[i + 1] = '\0';
+                        buffer_free(&buf);
+                        return complete;
+                    }
+                }
+            }
+        } else {
+            break;  // Read error
+        }
+    }
+    
+    buffer_free(&buf);
+    return NULL;  // Timeout
+}
+
 static char *send_request(MCPClient *mcp, cJSON *request) {
     char *json_str = cJSON_Print(request);
     if (!json_str) return NULL;
@@ -27,33 +100,29 @@ static char *send_request(MCPClient *mcp, cJSON *request) {
     DWORD written;
     WriteFile(mcp->stdin_fd, json_str, (DWORD)strlen(json_str), &written, NULL);
     WriteFile(mcp->stdin_fd, "\n", 1, &written, NULL);
+    FlushFileBuffers(mcp->stdin_fd);
     
     free(json_str);
     
-    // Read response
-    Buffer buf;
-    buffer_init(&buf);
+    // Read response with timeout
+    return read_response_with_timeout(mcp);
+}
+
+// Check if response ID matches expected ID
+static bool check_response_id(cJSON *response, int expected_id) {
+    cJSON *id = cJSON_GetObjectItem(response, "id");
+    if (!id) return false;
     
-    char chunk[4096];
-    DWORD bytes_read;
-    
-    while (ReadFile(mcp->stdout_fd, chunk, sizeof(chunk) - 1, &bytes_read, NULL) && bytes_read > 0) {
-        chunk[bytes_read] = '\0';
-        buffer_append(&buf, chunk, bytes_read);
-        
-        // Check if we have complete JSON
-        char *str = buffer_c_str(&buf);
-        cJSON *resp = cJSON_Parse(str);
-        if (resp) {
-            char *result = cJSON_Print(resp);
-            cJSON_Delete(resp);
-            buffer_free(&buf);
-            return result;
-        }
+    // ID can be number or string
+    if (id->type == cJSON_Number) {
+        return (int)id->valuedouble == expected_id;
+    } else if (id->type == cJSON_String) {
+        char id_str[32];
+        snprintf(id_str, sizeof(id_str), "%d", expected_id);
+        return strcmp(id->valuestring, id_str) == 0;
     }
     
-    buffer_free(&buf);
-    return NULL;
+    return false;
 }
 
 MCPClient *mcp_client_new(const char *name, const char *command) {
@@ -125,12 +194,24 @@ bool mcp_initialize(MCPClient *mcp) {
     CloseHandle(stdin_read);
     CloseHandle(stdout_write);
     
-    // Send initialize request
+    // Build initialize request (matching Go version)
+    int req_id = next_id(mcp);
+    
     cJSON *req = cJSON_CreateObject();
     cJSON_AddItemToObject(req, "jsonrpc", cJSON_CreateString("2.0"));
+    cJSON_AddItemToObject(req, "id", cJSON_CreateNumber(req_id));
     cJSON_AddItemToObject(req, "method", cJSON_CreateString("initialize"));
-    cJSON_AddItemToObject(req, "params", cJSON_CreateObject());
-    cJSON_AddItemToObject(req, "id", cJSON_CreateNumber(next_id(mcp)));
+    
+    cJSON *params = cJSON_CreateObject();
+    cJSON_AddItemToObject(params, "protocolVersion", cJSON_CreateString("2024-11-05"));
+    cJSON_AddItemToObject(params, "capabilities", cJSON_CreateObject());
+    
+    cJSON *clientInfo = cJSON_CreateObject();
+    cJSON_AddItemToObject(clientInfo, "name", cJSON_CreateString("nanoclaude"));
+    cJSON_AddItemToObject(clientInfo, "version", cJSON_CreateString("1.0.0"));
+    cJSON_AddItemToObject(params, "clientInfo", clientInfo);
+    
+    cJSON_AddItemToObject(req, "params", params);
     
     char *resp = send_request(mcp, req);
     cJSON_Delete(req);
@@ -142,6 +223,19 @@ bool mcp_initialize(MCPClient *mcp) {
     
     if (!resp_obj) return false;
     
+    // Check response ID
+    if (!check_response_id(resp_obj, req_id)) {
+        cJSON_Delete(resp_obj);
+        return false;
+    }
+    
+    // Check for error
+    cJSON *error = cJSON_GetObjectItem(resp_obj, "error");
+    if (error) {
+        cJSON_Delete(resp_obj);
+        return false;
+    }
+    
     cJSON_Delete(resp_obj);
     mcp->initialized = true;
     
@@ -151,40 +245,59 @@ bool mcp_initialize(MCPClient *mcp) {
 cJSON *mcp_list_tools(MCPClient *mcp) {
     if (!mcp || !mcp->initialized) return NULL;
     
+    int req_id = next_id(mcp);
+    
     cJSON *req = cJSON_CreateObject();
     cJSON_AddItemToObject(req, "jsonrpc", cJSON_CreateString("2.0"));
+    cJSON_AddItemToObject(req, "id", cJSON_CreateNumber(req_id));
     cJSON_AddItemToObject(req, "method", cJSON_CreateString("tools/list"));
-    cJSON_AddItemToObject(req, "id", cJSON_CreateNumber(next_id(mcp)));
+    cJSON_AddItemToObject(req, "params", cJSON_CreateObject());
     
     char *resp = send_request(mcp, req);
     cJSON_Delete(req);
     
     if (!resp) return NULL;
     
-    cJSON *result = cJSON_Parse(resp);
+    cJSON *resp_obj = cJSON_Parse(resp);
     free(resp);
     
-    if (!result) return NULL;
+    if (!resp_obj) return NULL;
     
-    cJSON *tools = cJSON_GetObjectItem(result, "result");
-    if (tools) {
-        cJSON *tools_arr = cJSON_GetObjectItem(tools, "tools");
+    // Check response ID
+    if (!check_response_id(resp_obj, req_id)) {
+        cJSON_Delete(resp_obj);
+        return NULL;
+    }
+    
+    // Check for error
+    cJSON *error = cJSON_GetObjectItem(resp_obj, "error");
+    if (error) {
+        cJSON_Delete(resp_obj);
+        return NULL;
+    }
+    
+    cJSON *result = cJSON_GetObjectItem(resp_obj, "result");
+    if (result) {
+        cJSON *tools_arr = cJSON_GetObjectItem(result, "tools");
         if (tools_arr) {
             cJSON *copy = cJSON_Duplicate(tools_arr, 1);
-            cJSON_Delete(result);
+            cJSON_Delete(resp_obj);
             return copy;
         }
     }
     
-    cJSON_Delete(result);
+    cJSON_Delete(resp_obj);
     return NULL;
 }
 
 cJSON *mcp_call_tool(MCPClient *mcp, const char *tool_name, cJSON *arguments) {
     if (!mcp || !mcp->initialized) return NULL;
     
+    int req_id = next_id(mcp);
+    
     cJSON *req = cJSON_CreateObject();
     cJSON_AddItemToObject(req, "jsonrpc", cJSON_CreateString("2.0"));
+    cJSON_AddItemToObject(req, "id", cJSON_CreateNumber(req_id));
     cJSON_AddItemToObject(req, "method", cJSON_CreateString("tools/call"));
     
     cJSON *params = cJSON_CreateObject();
@@ -195,26 +308,38 @@ cJSON *mcp_call_tool(MCPClient *mcp, const char *tool_name, cJSON *arguments) {
         cJSON_AddItemToObject(params, "arguments", cJSON_CreateObject());
     }
     cJSON_AddItemToObject(req, "params", params);
-    cJSON_AddItemToObject(req, "id", cJSON_CreateNumber(next_id(mcp)));
     
     char *resp = send_request(mcp, req);
     cJSON_Delete(req);
     
     if (!resp) return NULL;
     
-    cJSON *result = cJSON_Parse(resp);
+    cJSON *resp_obj = cJSON_Parse(resp);
     free(resp);
     
-    if (!result) return NULL;
+    if (!resp_obj) return NULL;
     
-    cJSON *call_result = cJSON_GetObjectItem(result, "result");
-    if (call_result) {
-        cJSON *copy = cJSON_Duplicate(call_result, 1);
-        cJSON_Delete(result);
+    // Check response ID
+    if (!check_response_id(resp_obj, req_id)) {
+        cJSON_Delete(resp_obj);
+        return NULL;
+    }
+    
+    // Check for error
+    cJSON *error = cJSON_GetObjectItem(resp_obj, "error");
+    if (error) {
+        cJSON_Delete(resp_obj);
+        return NULL;
+    }
+    
+    cJSON *result = cJSON_GetObjectItem(resp_obj, "result");
+    if (result) {
+        cJSON *copy = cJSON_Duplicate(result, 1);
+        cJSON_Delete(resp_obj);
         return copy;
     }
     
-    cJSON_Delete(result);
+    cJSON_Delete(resp_obj);
     return NULL;
 }
 
