@@ -2,7 +2,7 @@
 #define JSONRPC_H
 
 #include <stdbool.h>
-#include <pthread.h>
+#include "compat.h"
 #include "cJSON.h"
 
 // MCP Client handle

@@ -1,11 +1,10 @@
 #include "config.h"
 #include "../deps/cJSON/cJSON.h"
+#include "compat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
-#include <unistd.h>
-#include <sys/types.h>
 
 Config g_config;
 

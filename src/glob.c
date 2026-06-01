@@ -4,125 +4,169 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
-#include <sys/stat.h>
 #include <windows.h>
 
 // Max output size for glob (100KB)
 #define MAX_GLOB_OUTPUT (100 * 1024)
+
+// Max directory depth
+#define MAX_DEPTH 20
 
 // Check if output buffer is full
 static int is_output_full(GlobResult *result) {
     return result->buf.len >= MAX_GLOB_OUTPUT;
 }
 
-// Match filename against glob pattern (simple implementation)
+// Match filename against glob pattern
 static int glob_match(const char *filename, const char *pattern) {
-    if (!filename || !pattern || !*filename || !*pattern) return 0;
-    
-    // Simple recursive matcher with backtracking
+    if (!filename || !pattern) return 0;
+
     const char *f = filename;
     const char *p = pattern;
-    
+
     while (*p && *f) {
         if (*p == '*') {
-            // Try matching with zero chars first, then backtrack
-            p++;
-            // Try each position in filename
-            const char *try_f = f;
-            while (*try_f) {
-                if (glob_match(try_f, p)) return 1;
-                if (*try_f == '/' || *try_f == '\\') break;  // * doesn't cross dirs
-                try_f++;
+            p++;  // Skip the '*', now p points to what comes after *
+            // Try matching * against 0, 1, 2, ... characters
+            // First try matching * against 0 chars (skip *)
+            if (glob_match(f, p)) return 1;
+            // Then try matching * against 1+ chars
+            while (*f) {
+                if (*f == '/' || *f == '\\') break;  // * doesn't cross path boundaries
+                f++;
+                if (glob_match(f, p)) return 1;
             }
-            return glob_match(try_f, p);  // Try with zero chars
+            return 0;  // No match found for this *
         } else if (*p == '?') {
-            // Match any single char except path separator
             if (*f == '/' || *f == '\\') return 0;
             p++;
             f++;
         } else {
-            // Literal match (case-insensitive)
             if (tolower((unsigned char)*p) != tolower((unsigned char)*f)) return 0;
             p++;
             f++;
         }
     }
-    
-    // Skip remaining * in pattern
+
+    // Handle trailing *'s (they can match empty string)
     while (*p == '*') p++;
-    
+
     return (*p == '\0' && *f == '\0');
 }
 
-// Walk directory
-static void walk_directory(const char *dir, GlobConfig *cfg, GlobResult *result) {
-    if (is_output_full(result)) return;
-    
-    char search_path[MAX_PATH];
-    snprintf(search_path, sizeof(search_path), "%s\\*", dir);
-    
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(search_path, &fd);
-    
-    if (h == INVALID_HANDLE_VALUE) return;
-    
-    do {
-        if (is_output_full(result)) break;
-        
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
-        if (cfg->exclude_hidden && fd.cFileName[0] == '.') continue;
-        
-        char full_path[MAX_PATH];
-        snprintf(full_path, sizeof(full_path), "%s\\%s", dir, fd.cFileName);
-        
-        int is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-        
-        if (cfg->type_filter == GLOB_TYPE_FILE && is_dir) continue;
-        if (cfg->type_filter == GLOB_TYPE_DIR && !is_dir) continue;
-        
-        // Check pattern match
-        if (glob_match(fd.cFileName, cfg->pattern)) {
-            buffer_append_str(&result->buf, full_path);
-            buffer_append_str(&result->buf, "\n");
-            result->count++;
-            
-            if (cfg->max_results > 0 && result->count >= cfg->max_results) break;
-        }
-        
-        // Recurse into directories (for ** patterns)
-        if (is_dir) {
-            walk_directory(full_path, cfg, result);
-        }
-    } while (FindNextFileA(h, &fd) && !is_output_full(result));
-    
-    FindClose(h);
+// Simple stack entry for iterative directory walking
+typedef struct DirEntry {
+    char path[MAX_PATH];
+    struct DirEntry *next;
+} DirEntry;
+
+// Skip known large/problematic directories
+static int should_skip_dir(const char *dirname) {
+    if (dirname[0] == '.' && dirname[1] == 'g' && strcmp(dirname, ".git") == 0) return 1;
+    if (strcmp(dirname, "node_modules") == 0) return 1;
+    if (strcmp(dirname, "__pycache__") == 0) return 1;
+    if (dirname[0] == '.' && strcmp(dirname, ".cache") == 0) return 1;
+    if (strcmp(dirname, ".claude") == 0) return 1;
+    if (strcmp(dirname, "target") == 0) return 1;
+    return 0;
+}
+
+// Walk directory iteratively (no recursion - avoids stack overflow)
+static void walk_directory(const char *start_dir, const char *file_pattern, GlobConfig *cfg, GlobResult *result) {
+    DirEntry *stack = NULL;
+
+    // Push start directory
+    DirEntry *first = calloc(1, sizeof(DirEntry));
+    if (!first) return;
+    strncpy(first->path, start_dir, MAX_PATH - 1);
+    first->next = NULL;
+    stack = first;
+
+    while (stack && !is_output_full(result)) {
+        // Pop directory from stack
+        DirEntry *current = stack;
+        stack = stack->next;
+        char dir[MAX_PATH];
+        strncpy(dir, current->path, MAX_PATH - 1);
+        dir[MAX_PATH - 1] = '\0';
+        free(current);
+
+        char search_path[MAX_PATH];
+        snprintf(search_path, sizeof(search_path), "%s\\*", dir);
+
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA(search_path, &fd);
+
+        if (h == INVALID_HANDLE_VALUE) continue;
+
+        do {
+            if (is_output_full(result)) break;
+
+            if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+            if (cfg->exclude_hidden && fd.cFileName[0] == '.') continue;
+
+            char full_path[MAX_PATH];
+            snprintf(full_path, sizeof(full_path), "%s\\%s", dir, fd.cFileName);
+
+            int is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+            if (cfg->type_filter == GLOB_TYPE_FILE && is_dir) continue;
+            if (cfg->type_filter == GLOB_TYPE_DIR && !is_dir) continue;
+
+            // Check pattern match
+            if (glob_match(fd.cFileName, file_pattern)) {
+                buffer_append_str(&result->buf, full_path);
+                buffer_append_str(&result->buf, "\n");
+                result->count++;
+
+                if (cfg->max_results > 0 && result->count >= cfg->max_results) break;
+            }
+
+            // Push subdirectory onto stack
+            if (is_dir && !should_skip_dir(fd.cFileName)) {
+                DirEntry *sub = calloc(1, sizeof(DirEntry));
+                if (sub) {
+                    strncpy(sub->path, full_path, MAX_PATH - 1);
+                    sub->next = stack;
+                    stack = sub;
+                }
+            }
+        } while (FindNextFileA(h, &fd) && !is_output_full(result));
+
+        FindClose(h);
+    }
+
+    // Free any remaining stack entries
+    while (stack) {
+        DirEntry *next = stack->next;
+        free(stack);
+        stack = next;
+    }
 }
 
 // Main glob function
 GlobResult *glob_search(GlobConfig *cfg) {
     if (!cfg || !cfg->pattern) return NULL;
-    
+
     GlobResult *result = calloc(1, sizeof(GlobResult));
     if (!result) return NULL;
-    
+
     buffer_init(&result->buf);
     result->count = 0;
-    
+
     const char *dir = cfg->path ? cfg->path : ".";
     const char *pattern = cfg->pattern;
-    
+
     // Check if pattern has path separator
     const char *last_sep = strrchr(pattern, '/');
     if (!last_sep) last_sep = strrchr(pattern, '\\');
-    
+
     if (last_sep && last_sep != pattern) {
-        // Pattern includes directory, extract it
         size_t dir_len = last_sep - pattern;
         char dir_part[512] = {0};
         strncpy(dir_part, pattern, dir_len);
-        
-        // Combine dir with cfg->path
-        if (dir_part[0] == '/' || dir_part[0] == '\\' || 
+
+        if (dir_part[0] == '/' || dir_part[0] == '\\' ||
             (strlen(dir) == 1 && dir[0] == '.')) {
             dir = dir_part;
         } else {
@@ -133,10 +177,10 @@ GlobResult *glob_search(GlobConfig *cfg) {
         }
         pattern = last_sep + 1;
     }
-    
+
     // Check if recursive (**)
     if (strstr(cfg->pattern, "**")) {
-        walk_directory(dir, cfg, result);
+        walk_directory(dir, pattern, cfg, result);
     } else {
         // Non-recursive
         char search_path[MAX_PATH];
@@ -144,41 +188,45 @@ GlobResult *glob_search(GlobConfig *cfg) {
         if (!strchr(pattern, '*') && !strchr(pattern, '?')) {
             strncat(search_path, "*", sizeof(search_path) - strlen(search_path) - 1);
         }
-        
+
         WIN32_FIND_DATAA fd;
         HANDLE h = FindFirstFileA(search_path, &fd);
-        
+
         if (h != INVALID_HANDLE_VALUE) {
             do {
                 if (is_output_full(result)) break;
                 if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
                 if (cfg->exclude_hidden && fd.cFileName[0] == '.') continue;
-                
+
                 int is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
                 if (cfg->type_filter == GLOB_TYPE_FILE && is_dir) continue;
                 if (cfg->type_filter == GLOB_TYPE_DIR && !is_dir) continue;
-                
+
                 if (glob_match(fd.cFileName, pattern)) {
                     char full_path[MAX_PATH];
                     snprintf(full_path, sizeof(full_path), "%s\\%s", dir, fd.cFileName);
                     buffer_append_str(&result->buf, full_path);
                     buffer_append_str(&result->buf, "\n");
                     result->count++;
-                    
+
                     if (cfg->max_results > 0 && result->count >= cfg->max_results) break;
                 }
             } while (FindNextFileA(h, &fd));
             FindClose(h);
         }
     }
-    
+
     return result;
 }
 
 char *glob_get_output(GlobResult *result) {
-    if (!result) return strdup("");
+    if (!result || !result->buf.data) return strdup("No matches found.");
     if (result->count == 0) return strdup("No matches found.");
-    return buffer_c_str(&result->buf);
+    char *data = result->buf.data;
+    result->buf.data = NULL;
+    result->buf.len = 0;
+    result->buf.capacity = 0;
+    return data;
 }
 
 void glob_free_result(GlobResult *result) {

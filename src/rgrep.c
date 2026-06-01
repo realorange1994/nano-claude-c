@@ -4,7 +4,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
-#include <sys/stat.h>
 #include <windows.h>
 
 // File type to extension mappings (similar to ripgrep)
@@ -230,53 +229,60 @@ static int regex_matches(const char *text, const char *pattern, int case_sensiti
 static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *result) {
     // Check if output is already full
     if (is_output_full(result)) return;
-    
-    FILE *f = fopen(filepath, "r");
+
+    FILE *f = fopen(filepath, "rb");
     if (!f) return;
-    
+
     char line[8192];
     int line_num = 0;
     int file_matches = 0;
-    
+
     while (fgets(line, sizeof(line), f)) {
         // Check if output is full before processing
         if (is_output_full(result)) break;
-        
+
         line_num++;
-        
+
+        // Strip null bytes (binary data may have slipped through)
+        for (char *p = line; *p; p++) {
+            if (*p == '\0') *p = ' ';
+        }
+
         // Truncate line if too long
         if (cfg->max_line_length > 0 && (int)strlen(line) > cfg->max_line_length) {
             line[cfg->max_line_length] = '\0';
         }
-        
-        // Remove trailing newline for matching
+
+        // Remove trailing newline/carriage return
         size_t line_len = strlen(line);
-        if (line_len > 0 && line[line_len - 1] == '\n') {
-            line[line_len - 1] = '\0';
+        while (line_len > 0 && (line[line_len - 1] == '\n' || line[line_len - 1] == '\r')) {
+            line[--line_len] = '\0';
         }
-        
+
+        if (line_len == 0) continue;  // Skip empty lines
+
         // Check for match
         if (regex_matches(line, cfg->pattern, cfg->case_sensitive)) {
             file_matches++;
-            
+
             // Check max count per file
             if (cfg->max_count > 0 && file_matches > cfg->max_count) {
                 break;
             }
-            
+
             // Check output buffer size before appending
             if (is_output_full(result)) {
                 fclose(f);
                 return;
             }
-            
+
             // Format based on output mode
             switch (cfg->output_mode) {
                 case OUTPUT_FILES:
                     buffer_append_str(&result->buf, filepath);
                     buffer_append_str(&result->buf, "\n");
                     break;
-                    
+
                 case OUTPUT_COUNT:
                     buffer_append_str(&result->buf, filepath);
                     buffer_append_str(&result->buf, ":");
@@ -286,7 +292,7 @@ static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *res
                         buffer_append_str(&result->buf, num);
                     }
                     break;
-                    
+
                 case OUTPUT_CONTENT:
                 default:
                     buffer_append_str(&result->buf, filepath);
@@ -300,59 +306,101 @@ static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *res
                     buffer_append_str(&result->buf, "\n");
                     break;
             }
-            
+
             result->total_matches++;
             result->files_matched++;
         }
-        
+
         // Check max results limit
         if (cfg->max_results > 0 && result->total_matches >= cfg->max_results) {
             break;
         }
     }
-    
+
     fclose(f);
 }
 
-// Walk directory recursively
-static void walk_directory(const char *dir, RGrepConfig *cfg, RGrepResult *result) {
-    // Check if output is already full
-    if (is_output_full(result)) return;
-    
-    char search_path[MAX_PATH];
-    snprintf(search_path, sizeof(search_path), "%s\\*", dir);
-    
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(search_path, &fd);
-    
-    if (h == INVALID_HANDLE_VALUE) return;
-    
-    do {
-        // Skip . and ..
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) {
-            continue;
-        }
-        
-        // Check if output is full
-        if (is_output_full(result)) break;
-        
-        // Build full path
-        char full_path[MAX_PATH];
-        snprintf(full_path, sizeof(full_path), "%s\\%s", dir, fd.cFileName);
-        
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            // Recurse into subdirectory
-            walk_directory(full_path, cfg, result);
-        } else {
-            // Check file filters
-            if (should_search_file(full_path, cfg)) {
-                result->files_scanned++;
-                search_file(full_path, cfg, result);
+// Walk directory iteratively (no recursion - avoids stack overflow)
+typedef struct DirEntry {
+    char path[MAX_PATH];
+    struct DirEntry *next;
+} DirEntry;
+
+static int should_skip_dir(const char *dirname) {
+    if (strcmp(dirname, ".git") == 0 || strcmp(dirname, "node_modules") == 0 ||
+        strcmp(dirname, "__pycache__") == 0 || strcmp(dirname, ".cache") == 0 ||
+        strcmp(dirname, ".claude") == 0 || strcmp(dirname, "dist") == 0 ||
+        strcmp(dirname, "target") == 0 || strcmp(dirname, "build") == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static void walk_directory(const char *start_dir, RGrepConfig *cfg, RGrepResult *result) {
+    DirEntry *stack = NULL;
+
+    DirEntry *first = calloc(1, sizeof(DirEntry));
+    if (!first) return;
+    strncpy(first->path, start_dir, MAX_PATH - 1);
+    first->next = NULL;
+    stack = first;
+
+    while (stack && !is_output_full(result)) {
+        DirEntry *current = stack;
+        stack = stack->next;
+        char dir[MAX_PATH];
+        strncpy(dir, current->path, MAX_PATH - 1);
+        dir[MAX_PATH - 1] = '\0';
+        free(current);
+
+        // Skip known large directories
+        const char *bname = strrchr(dir, '\\');
+        if (!bname) bname = strrchr(dir, '/');
+        if (!bname) bname = dir; else bname++;
+        if (should_skip_dir(bname)) continue;
+
+        char search_path[MAX_PATH];
+        snprintf(search_path, sizeof(search_path), "%s\\*", dir);
+
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA(search_path, &fd);
+
+        if (h == INVALID_HANDLE_VALUE) continue;
+
+        do {
+            if (is_output_full(result)) break;
+
+            if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+            if (fd.cFileName[0] == '.' || fd.cFileName[0] == '_') continue;
+
+            char full_path[MAX_PATH];
+            snprintf(full_path, sizeof(full_path), "%s\\%s", dir, fd.cFileName);
+
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (!should_skip_dir(fd.cFileName)) {
+                    DirEntry *sub = calloc(1, sizeof(DirEntry));
+                    if (sub) {
+                        strncpy(sub->path, full_path, MAX_PATH - 1);
+                        sub->next = stack;
+                        stack = sub;
+                    }
+                }
+            } else {
+                if (should_search_file(full_path, cfg)) {
+                    result->files_scanned++;
+                    search_file(full_path, cfg, result);
+                }
             }
-        }
-    } while (FindNextFileA(h, &fd) && !is_output_full(result));
-    
-    FindClose(h);
+        } while (FindNextFileA(h, &fd) && !is_output_full(result));
+
+        FindClose(h);
+    }
+
+    while (stack) {
+        DirEntry *next = stack->next;
+        free(stack);
+        stack = next;
+    }
 }
 
 // Main search function
@@ -360,36 +408,30 @@ RGrepResult *rgrep_search(RGrepConfig *cfg) {
     if (!cfg || !cfg->pattern) {
         return NULL;
     }
-    
+
     RGrepResult *result = calloc(1, sizeof(RGrepResult));
     if (!result) return NULL;
-    
+
     buffer_init(&result->buf);
     result->files_scanned = 0;
     result->files_matched = 0;
     result->total_matches = 0;
-    
-    // Use default path if not provided
+
     const char *search_path = cfg->path ? cfg->path : ".";
-    
-    // Validate path
     if (!search_path || !search_path[0]) {
         search_path = ".";
     }
-    
-    // Check if path is a file
+
     DWORD attr = GetFileAttributesA(search_path);
     if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        // It's a file
         if (should_search_file(search_path, cfg)) {
             result->files_scanned = 1;
             search_file(search_path, cfg, result);
         }
     } else {
-        // It's a directory
         walk_directory(search_path, cfg, result);
     }
-    
+
     return result;
 }
 
@@ -400,6 +442,11 @@ void rgrep_free_result(RGrepResult *result) {
 }
 
 char *rgrep_get_output(RGrepResult *result) {
-    if (!result) return strdup("");
-    return buffer_c_str(&result->buf);
+    if (!result || !result->buf.data) return strdup("");
+    // Steal the buffer's data (caller takes ownership)
+    char *data = result->buf.data;
+    result->buf.data = NULL;
+    result->buf.len = 0;
+    result->buf.capacity = 0;
+    return data;
 }

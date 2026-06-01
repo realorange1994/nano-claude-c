@@ -945,6 +945,8 @@ static void history_inject_time(History *h) {
 
 static const char *cjson_get_str(cJSON *obj, const char *key) {
 
+    if (!obj) return "";
+
     cJSON *v = cJSON_GetObjectItem(obj, key);
 
     return (v && v->valuestring) ? v->valuestring : "";
@@ -1310,76 +1312,59 @@ int repl_run(REPL *repl) {
 
 
                 cJSON *args = repl->pending_tool_inputs[i]
-
                     ? cJSON_Parse(repl->pending_tool_inputs[i])
-
                     : NULL;
 
-
-
                 print_tool_action(repl->pending_tool_names[i], args);
-
-
+                fflush(stdout);
 
                 char *error = NULL;
+                char *result = NULL;
 
-                char *result = tool_execute(repl->tools, repl->pending_tool_names[i], args, &error);
-
-
-
-                if (result) {
-
-                    history_add_tool_result(&repl->history, repl->pending_tool_ids[i],
-
-                                    repl->pending_tool_names[i], result);
-
-                    fwrite(result, 1, strlen(result), stdout); putchar(10);
-
-                    free(result);
-
-                } else if (error) {
-
-                    history_add_tool_result(&repl->history, repl->pending_tool_ids[i],
-
-                                    repl->pending_tool_names[i], error);
-
-                    fwrite(error, 1, strlen(error), stdout); putchar(10);
-
-                    free(error);
-
-                }
-
-
+                printf("[T0] before tool_execute\n"); fflush(stdout);
+                result = tool_execute(repl->tools, repl->pending_tool_names[i], args, &error);
+                printf("[T1] tool_execute done: result=%p error=%p\n", (void*)result, (void*)error); fflush(stdout);
 
                 if (args) cJSON_Delete(args);
 
-            }
+                if (result) {
+                    printf("[T2] result='%s'\n", result); fflush(stdout);
+                    history_add_tool_result(&repl->history, repl->pending_tool_ids[i],
+                                    repl->pending_tool_names[i], result);
+                    printf("[T3] history added\n"); fflush(stdout);
+                    size_t rlen = strlen(result);
+                    if (rlen > 50000) rlen = 50000;
+                    for (size_t j = 0; j < rlen; j++) {
+                        unsigned char c = (unsigned char)result[j];
+                        if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') result[j] = ' ';
+                    }
+                    printf("[T4] sanitize done\n"); fflush(stdout);
+                    printf("%.*s\n", (int)rlen, result);
+                    fflush(stdout);
+                    printf("[T5] printf done\n"); fflush(stdout);
+                    free(result);
+                    printf("[T6] free done\n"); fflush(stdout);
+                    result = NULL;
+                } else if (error) {
+                    printf("Error: %s\n", error);
+                    free(error);
+                    error = NULL;
+                }
 
-
+            }  // end for i
 
             if (interrupted) break;
 
-
-
             // Check compaction
-
             if (history_needs_compact(&repl->history)) {
-
                 printf("\n[Context limit approaching, summarizing history...]\n");
-
                 repl_run_compaction(repl);
-
             }
 
-
-
             // Clear pending tools and continue to next iteration
-
             repl_clear_tools(repl);
-
             continue;
-
-        }
+        }  // end for iteration
 
 
 

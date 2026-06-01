@@ -3,13 +3,12 @@
 #include "glob.h"
 #include "calc.h"
 #include "buffer.h"
+#include "compat.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <time.h>
-#include <sys/time.h>
-#include <windows.h>
 #include <math.h>
 #include <stdint.h>
 
@@ -326,13 +325,13 @@ char *tool_read_file(cJSON *input, char **error) {
         *error = strdup("missing path parameter");
         return NULL;
     }
-    
+
     cJSON *offset = cJSON_GetObjectItem(input, "offset");
     cJSON *limit = cJSON_GetObjectItem(input, "limit");
-    
+
     int line_offset = 0;
     int line_limit = MAX_READ_LINES;
-    
+
     if (offset && offset->type == cJSON_Number) {
         int val = (int)offset->valuedouble;
         if (val < 1) {
@@ -345,64 +344,63 @@ char *tool_read_file(cJSON *input, char **error) {
         int val = (int)limit->valuedouble;
         if (val > 0 && val < MAX_READ_LINES) line_limit = val;
     }
-    
+
     FILE *f = fopen(path->valuestring, "r");
     if (!f) {
         *error = strdup("failed to open file");
         return NULL;
     }
-    
-    // Read lines using fgets (safer than loading entire file)
+
     Buffer lines_buf;
     buffer_init(&lines_buf);
-    
+
     char line[4096];
     int total_file_lines = 0;
     int lines_read = 0;
-    
-    // First pass: count total lines and read requested lines
+
     while (fgets(line, sizeof(line), f)) {
         total_file_lines++;
-        
-        // Skip lines before offset
         if (total_file_lines <= line_offset) continue;
         if (lines_read >= line_limit) continue;
-        
-        // Remove trailing newline
+
         size_t len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
             line[--len] = '\0';
         }
-        
-        // Add line
+
         buffer_append_str(&lines_buf, line);
         buffer_append_str(&lines_buf, "\n");
         lines_read++;
     }
-    
+
     fclose(f);
-    
-    char *result = buffer_c_str(&lines_buf);
+
+    char *result = lines_buf.data ? lines_buf.data : strdup("");
+    lines_buf.data = NULL;
+    lines_buf.len = 0;
+    lines_buf.capacity = 0;
     buffer_free(&lines_buf);
-    
-    // Build output with pagination
+
     Buffer out_buf;
     buffer_init(&out_buf);
     buffer_append_str(&out_buf, result);
     free(result);
-    
+
     int more_lines = total_file_lines - (line_offset + lines_read);
-    
+
     if (more_lines > 0) {
         char suffix[256];
         snprintf(suffix, sizeof(suffix), "\n\n[%d more lines in file. Use offset=%d to continue.]",
                  more_lines, line_offset + lines_read + 1);
         buffer_append_str(&out_buf, suffix);
     }
-    
-    char *output = buffer_c_str(&out_buf);
+
+    char *output = out_buf.data ? out_buf.data : strdup("");
+    out_buf.data = NULL;
+    out_buf.len = 0;
+    out_buf.capacity = 0;
     buffer_free(&out_buf);
-    
+
     return output;
 }
 
@@ -777,68 +775,50 @@ static int fuzzy_find_text(const char *content, const char *search) {
 }
 
 char *tool_grep(cJSON *input, char **error) {
-    cJSON *pattern = cJSON_GetObjectItem(input, "pattern");
+    cJSON *pat = cJSON_GetObjectItem(input, "pattern");
     cJSON *path = cJSON_GetObjectItem(input, "path");
     cJSON *glob = cJSON_GetObjectItem(input, "glob");
     cJSON *file_type = cJSON_GetObjectItem(input, "fileType");
     cJSON *context = cJSON_GetObjectItem(input, "context");
     cJSON *max_count = cJSON_GetObjectItem(input, "maxCount");
     cJSON *max_results = cJSON_GetObjectItem(input, "maxResults");
-    cJSON *output_mode = cJSON_GetObjectItem(input, "outputMode");
-    cJSON *include_binary = cJSON_GetObjectItem(input, "includeBinary");
-    cJSON *case_sensitive = cJSON_GetObjectItem(input, "caseSensitive");
-    cJSON *max_line_length = cJSON_GetObjectItem(input, "maxLineLength");
-    
-    if (!pattern || !pattern->valuestring) {
+    cJSON *cs = cJSON_GetObjectItem(input, "caseSensitive");
+    cJSON *inc_bin = cJSON_GetObjectItem(input, "includeBinary");
+    cJSON *mll = cJSON_GetObjectItem(input, "maxLineLength");
+    cJSON *omode = cJSON_GetObjectItem(input, "outputMode");
+
+    if (!pat || !pat->valuestring) {
         *error = strdup("missing pattern parameter");
         return NULL;
     }
-    
-    // Build config
+
     RGrepConfig cfg = {0};
-    cfg.pattern = pattern->valuestring;
+    cfg.pattern = pat->valuestring;
     cfg.path = (path && path->valuestring) ? path->valuestring : ".";
     cfg.glob = (glob && glob->valuestring) ? glob->valuestring : NULL;
     cfg.file_type = (file_type && file_type->valuestring) ? file_type->valuestring : NULL;
     cfg.context = (context && context->type == cJSON_Number) ? (int)context->valuedouble : 0;
-    cfg.max_count = (max_count && max_count->type == cJSON_Number) ? (int)max_count->valuedouble : 100;  // Max per file
-    cfg.max_results = (max_results && max_results->type == cJSON_Number) ? (int)max_results->valuedouble : 250;  // Max total
-    cfg.max_line_length = (max_line_length && max_line_length->type == cJSON_Number) ? (int)max_line_length->valuedouble : 500;
-    cfg.case_sensitive = (case_sensitive && case_sensitive->type == cJSON_True);
-    cfg.include_binary = (include_binary && include_binary->type == cJSON_True);
-    
-    // Output mode
-    if (output_mode && output_mode->valuestring) {
-        if (strcmp(output_mode->valuestring, "files_with_matches") == 0) {
-            cfg.output_mode = OUTPUT_FILES;
-        } else if (strcmp(output_mode->valuestring, "count") == 0) {
-            cfg.output_mode = OUTPUT_COUNT;
-        } else {
-            cfg.output_mode = OUTPUT_CONTENT;
-        }
-    } else {
-        cfg.output_mode = OUTPUT_CONTENT;
+    cfg.max_count = (max_count && max_count->type == cJSON_Number) ? (int)max_count->valuedouble : 100;
+    cfg.max_results = (max_results && max_results->type == cJSON_Number) ? (int)max_results->valuedouble : 250;
+    cfg.case_sensitive = cJSON_IsBool(cs) ? cs->valueint : 0;
+    cfg.include_binary = cJSON_IsBool(inc_bin) ? inc_bin->valueint : 0;
+    cfg.max_line_length = (mll && mll->type == cJSON_Number) ? (int)mll->valuedouble : 500;
+    cfg.output_mode = OUTPUT_CONTENT;
+    if (omode && omode->valuestring) {
+        if (strcmp(omode->valuestring, "files_with_matches") == 0) cfg.output_mode = OUTPUT_FILES;
+        else if (strcmp(omode->valuestring, "count") == 0) cfg.output_mode = OUTPUT_COUNT;
     }
-    
-    // Perform search
+
     RGrepResult *result = rgrep_search(&cfg);
     if (!result) {
-        *error = strdup("search failed");
+        *error = strdup("grep search failed");
         return NULL;
     }
-    
+
     char *output = rgrep_get_output(result);
+    char *final_output = output ? strdup(output) : strdup("");
     rgrep_free_result(result);
-    
-    if (!output) return strdup("");
-    
-    // Remove trailing newline if present
-    size_t len = strlen(output);
-    if (len > 0 && output[len - 1] == '\n') {
-        output[len - 1] = '\0';
-    }
-    
-    return output;
+    return final_output;
 }
 
 char *tool_glob(cJSON *input, char **error) {
@@ -1255,21 +1235,26 @@ char *tool_exec(cJSON *input, char **error) {
     if (running) {
         WaitForSingleObject(pi.hProcess, 1000);
     }
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    CloseHandle(hReadOut);
-    CloseHandle(hReadErr);
-
-    // Get exit code
+    // Get exit code BEFORE closing handles
     DWORD exitCode = 0;
     if (!GetExitCodeProcess(pi.hProcess, &exitCode)) {
         exitCode = 1;
     }
 
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hReadOut);
+    CloseHandle(hReadErr);
+
     // Convert GBK output to UTF-8 for proper Chinese display
-    char *result = buffer_c_str(&buf);
-    char *utf8_result = convert_gbk_to_utf8(result);
+    // Steal buffer data to avoid use-after-free
+    char *result = buf.data ? buf.data : strdup("");
+    buf.data = NULL;
+    buf.len = 0;
+    buf.capacity = 0;
     buffer_free(&buf);
+    char *utf8_result = convert_gbk_to_utf8(result);
+    free(result);
     
     // Strip ANSI terminal codes
     char *clean_result = strip_ansi_codes(utf8_result);

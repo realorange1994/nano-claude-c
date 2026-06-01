@@ -8,6 +8,18 @@
 #include "repl.h"
 #include "http.h"
 
+// Global crash handler - catches any unhandled exception
+static LONG WINAPI global_crash_handler(EXCEPTION_POINTERS *ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    fprintf(stderr, "\n[CRASH] Exception code: 0x%08X\n", code);
+    fprintf(stderr, "[CRASH] Address: %p\n", (void*)(uintptr_t)ep->ExceptionRecord->ExceptionAddress);
+    fflush(stderr);
+    // Print a simple message to stdout so the user sees something
+    printf("\n[Process crashed: exception 0x%08X]\n", code);
+    fflush(stdout);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 static void print_help(const char *prog) {
     printf("NanoClaude-C - Pure C AI Agent\n");
     printf("Usage: %s [options]\n", prog);
@@ -26,6 +38,9 @@ static void print_help(const char *prog) {
 }
 
 int main(int argc, char *argv[]) {
+    // Set up global crash handler FIRST
+    SetUnhandledExceptionFilter(global_crash_handler);
+
     // Setup console for UTF-8
     SetConsoleOutputCP(65001);
     SetConsoleCP(65001);
