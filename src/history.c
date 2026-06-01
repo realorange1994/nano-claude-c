@@ -202,27 +202,37 @@ static int estimate_string_tokens(const char *str) {
     return chars;
 }
 
+static int estimate_entry_tokens(Entry *e) {
+    if (e->role == ROLE_ASSISTANT && e->tool_name) {
+        // Tool call: tool input JSON + overhead
+        return estimate_string_tokens(e->content) + 15;
+    }
+    if (e->type == ENTRY_TOOL_RESULT) {
+        // Tool result: result content + overhead
+        return estimate_string_tokens(e->tool_result) + 10;
+    }
+    if (e->role == ROLE_USER || e->role == ROLE_ASSISTANT) {
+        return estimate_string_tokens(e->content) + 10;
+    }
+    return 10; // system or other
+}
+
 int history_estimate_tokens(History *h) {
     int tokens = 0;
     for (int i = 0; i < h->count; i++) {
-        tokens += estimate_string_tokens(h->entries[i].content);
-        tokens += estimate_string_tokens(h->entries[i].tool_name);
-        tokens += estimate_string_tokens(h->entries[i].tool_result);
+        tokens += estimate_entry_tokens(&h->entries[i]);
     }
     if (h->summary) {
-        tokens += estimate_string_tokens(h->summary);
+        tokens += estimate_string_tokens(h->summary) + 10;
     }
     return tokens;
 }
 
 bool history_needs_compact(History *h) {
-    // Threshold: context_window - reserve_tokens - keep_recent_tokens/2
-    // This gives more room before triggering compact
-    int threshold = h->context_window - h->reserve_tokens - (h->keep_recent_tokens / 2);
-    if (threshold < h->context_window / 2) {
-        threshold = h->context_window / 2;  // At least 50% of context window
-    }
-    return history_estimate_tokens(h) > threshold;
+    // Pi-style: trigger when tokens > contextWindow - reserveTokens
+    int reserve = h->reserve_tokens;
+    if (reserve <= 0) reserve = 16384;
+    return history_estimate_tokens(h) > h->context_window - reserve;
 }
 
 // ============================================================================
@@ -335,29 +345,120 @@ cJSON *history_to_messages(History *h) {
 // Compaction
 // ============================================================================
 
-int history_find_cut_point(History *h) {
-    // Find the last entry before the keep_recent_tokens limit
-    int keep = h->keep_recent_tokens > 0 ? 4 : 0;
-    int cut_point = h->count - keep;
-    if (cut_point < 1) cut_point = 1;
+// Build list of valid cut points (entry indices where we can safely cut)
+// We can cut at user messages, assistant messages, or after tool results
+// Returns count of cut points stored in cut_points (max MAX_CUT_POINTS)
+#define MAX_CUT_POINTS 2048
 
-    // Try to find a good boundary (prefer ending at a user message or tool result)
-    for (int i = cut_point; i < h->count; i++) {
-        if (h->entries[i].type == ENTRY_MESSAGE && h->entries[i].role == ROLE_USER) {
-            return i;
-        }
-        if (h->entries[i].type == ENTRY_TOOL_RESULT) {
-            return i + 1;
+static int build_cut_points(History *h, int *cut_points, int *count) {
+    *count = 0;
+    for (int i = 0; i < h->count && *count < MAX_CUT_POINTS; i++) {
+        Entry *e = &h->entries[i];
+        switch (e->type) {
+        case ENTRY_MESSAGE:
+            cut_points[*count] = i; (*count)++; break;
+        case ENTRY_TOOL_RESULT:
+            // Can cut after a tool result
+            if (i + 1 < h->count) {
+                cut_points[*count] = i + 1; (*count)++;
+            }
+            break;
+        default: break;
         }
     }
-    return cut_point;
+    return *count;
+}
+
+int history_find_cut_point(History *h) {
+    if (h->count == 0) return 0;
+
+    int keep_recent = h->keep_recent_tokens > 0 ? h->keep_recent_tokens : 20000;
+    int cut_points[MAX_CUT_POINTS];
+    int num_cut = 0;
+    build_cut_points(h, cut_points, &num_cut);
+
+    if (num_cut == 0) {
+        // Fallback: find first tool result or return 0
+        for (int i = 0; i < h->count; i++) {
+            if (h->entries[i].type == ENTRY_TOOL_RESULT) return i;
+        }
+        return 0;
+    }
+
+    // Walk backwards from newest entry, accumulating tokens
+    int accumulated = 0;
+    for (int i = h->count - 1; i >= 0; i--) {
+        accumulated += estimate_entry_tokens(&h->entries[i]);
+        if (accumulated >= keep_recent) {
+            // Find closest cut point at or after this index
+            for (int j = 0; j < num_cut; j++) {
+                if (cut_points[j] >= i) {
+                    // Don't cut at a tool result (must follow its tool call)
+                    if (cut_points[j] < h->count &&
+                        h->entries[cut_points[j]].type == ENTRY_TOOL_RESULT) {
+                        continue;
+                    }
+                    return cut_points[j];
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+// Remove orphaned tool results whose tool call was cut away
+static void remove_orphaned_tool_results(History *h) {
+    // Build set of valid tool call IDs
+    int valid_count = 0;
+    char valid_ids[MAX_CUT_POINTS][64];
+    for (int i = 0; i < h->count && valid_count < MAX_CUT_POINTS; i++) {
+        Entry *e = &h->entries[i];
+        if (e->type == ENTRY_MESSAGE && e->role == ROLE_ASSISTANT && e->tool_name && e->tool_name[0]) {
+            strncpy(valid_ids[valid_count], e->parent_id[0] ? e->parent_id : e->id, 63);
+            valid_ids[valid_count][63] = '\0';
+            valid_count++;
+        }
+    }
+
+    // Compact out orphaned tool results
+    int write = 0;
+    for (int read = 0; read < h->count; read++) {
+        Entry *e = &h->entries[read];
+        if (e->type == ENTRY_TOOL_RESULT) {
+            // Check if parent_id matches any valid tool call ID
+            int found = 0;
+            for (int v = 0; v < valid_count; v++) {
+                if (strcmp(e->parent_id, valid_ids[v]) == 0) {
+                    found = 1; break;
+                }
+            }
+            if (!found) {
+                // Orphaned - free and skip
+                free(e->content);
+                free(e->tool_name);
+                free(e->tool_result);
+                continue;
+            }
+        }
+        if (write != read) {
+            h->entries[write] = h->entries[read];
+        }
+        write++;
+    }
+    // Clear old entries
+    for (int i = write; i < h->count; i++) {
+        memset(&h->entries[i], 0, sizeof(Entry));
+    }
+    h->count = write;
 }
 
 void history_compact(History *h, char *(*summarize_fn)(const char *)) {
-    if (!h->summary) {
-        h->summary = strdup("");
-    }
+    if (h->count == 0) return;
 
+    int keep_recent = h->keep_recent_tokens > 0 ? h->keep_recent_tokens : 20000;
+
+    // Build old content for summarization (entries before cut)
     Buffer old_content;
     buffer_init(&old_content);
 
@@ -366,42 +467,141 @@ void history_compact(History *h, char *(*summarize_fn)(const char *)) {
             buffer_append_str(&old_content, h->entries[i].content);
             buffer_append_str(&old_content, "\n");
         }
+        if (h->entries[i].tool_result) {
+            buffer_append_str(&old_content, "[TOOL: ");
+            buffer_append_str(&old_content, h->entries[i].tool_name ? h->entries[i].tool_name : "");
+            buffer_append_str(&old_content, "]: ");
+            buffer_append_str(&old_content, h->entries[i].tool_result);
+            buffer_append_str(&old_content, "\n");
+        }
     }
 
     char *summary = (*summarize_fn)(buffer_c_str(&old_content));
     buffer_free(&old_content);
 
-    if (summary && summary[0]) {
-        free(h->summary);
-        h->summary = summary;
-
-        // Find cut point
-        int cut_point = history_find_cut_point(h);
-
-        // Free entries before cut point
-        for (int i = 0; i < cut_point; i++) {
-            free(h->entries[i].content);
-            free(h->entries[i].tool_name);
-            free(h->entries[i].tool_result);
-        }
-
-        // Shift remaining entries to front
-        int keep_count = h->count - cut_point;
-        for (int i = 0; i < keep_count; i++) {
-            h->entries[i] = h->entries[cut_point + i];
-        }
-        // Clear old entries
-        for (int i = keep_count; i < h->count; i++) {
-            memset(&h->entries[i], 0, sizeof(Entry));
-        }
-        h->count = keep_count;
-        h->last_compaction_index = h->count - 1;
-    } else {
+    if (!summary || !summary[0]) {
         free(summary);
         fprintf(stderr, "[Compaction failed: no summary generated]\n");
+        return;
     }
+
+    // Store the summary BEFORE replacing entries
+    free(h->summary);
+    h->summary = summary;
+
+    // Find cut point
+    int cut_index = history_find_cut_point(h);
+    if (cut_index >= h->count) cut_index = h->count - 1;
+    if (cut_index == 0) return; // Nothing to compact
+
+    // Keep only entries after the cut
+    int keep_count = h->count - cut_index;
+    for (int i = 0; i < keep_count; i++) {
+        h->entries[i] = h->entries[cut_index + i];
+    }
+    // Clear old entries
+    for (int i = keep_count; i < h->count; i++) {
+        memset(&h->entries[i], 0, sizeof(Entry));
+    }
+    h->count = keep_count;
+
+    // Remove orphaned tool results whose tool call was cut away
+    remove_orphaned_tool_results(h);
+
+    // Rebuild file operations from remaining entries
+    h->read_files.count = 0;
+    h->written_files.count = 0;
+    h->edited_files.count = 0;
+    for (int i = 0; i < h->count; i++) {
+        Entry *e = &h->entries[i];
+        if (e->type == ENTRY_MESSAGE && e->role == ROLE_ASSISTANT && e->tool_name) {
+            cJSON *input = cJSON_Parse(e->content);
+            if (input) {
+                cJSON *path_item = cJSON_GetObjectItem(input, "file_path");
+                if (!path_item) path_item = cJSON_GetObjectItem(input, "path");
+                if (path_item && path_item->valuestring) {
+                    if (strcmp(e->tool_name, "Read") == 0) {
+                        if (h->read_files.count < MAX_FILE_PATHS)
+                            h->read_files.paths[h->read_files.count++] = strdup(path_item->valuestring);
+                    } else if (strcmp(e->tool_name, "Write") == 0) {
+                        if (h->written_files.count < MAX_FILE_PATHS)
+                            h->written_files.paths[h->written_files.count++] = strdup(path_item->valuestring);
+                    } else if (strcmp(e->tool_name, "Edit") == 0) {
+                        if (h->edited_files.count < MAX_FILE_PATHS)
+                            h->edited_files.paths[h->edited_files.count++] = strdup(path_item->valuestring);
+                    }
+                }
+                cJSON_Delete(input);
+            }
+        }
+    }
+
+    // Update parent IDs for kept entries
+    for (int i = 0; i < h->count; i++) {
+        if (i == 0) {
+            h->entries[i].parent_id[0] = '\0';
+        } else {
+            if (h->entries[i].type != ENTRY_TOOL_RESULT) {
+                strncpy(h->entries[i].parent_id, h->entries[i - 1].id, sizeof(h->entries[i].parent_id) - 1);
+                h->entries[i].parent_id[sizeof(h->entries[i].parent_id) - 1] = '\0';
+            }
+        }
+    }
+
+    h->last_compaction_index = h->count - 1;
 }
 
 // ============================================================================
 // File operation tracking
 // ============================================================================
+
+const char **history_get_read_files(History *h, int *count) {
+    *count = h->read_files.count;
+    return (const char **)h->read_files.paths;
+}
+
+const char **history_get_written_files(History *h, int *count) {
+    *count = h->written_files.count;
+    return (const char **)h->written_files.paths;
+}
+
+const char **history_get_edited_files(History *h, int *count) {
+    *count = h->edited_files.count;
+    return (const char **)h->edited_files.paths;
+}
+
+char *history_format_file_ops(History *h) {
+    Buffer buf;
+    buffer_init(&buf);
+
+    if (h->read_files.count > 0) {
+        buffer_append_str(&buf, "Read files:\n");
+        for (int i = 0; i < h->read_files.count; i++) {
+            buffer_append_str(&buf, "- ");
+            buffer_append_str(&buf, h->read_files.paths[i]);
+            buffer_append_str(&buf, "\n");
+        }
+    }
+    if (h->written_files.count > 0) {
+        buffer_append_str(&buf, "Written files:\n");
+        for (int i = 0; i < h->written_files.count; i++) {
+            buffer_append_str(&buf, "- ");
+            buffer_append_str(&buf, h->written_files.paths[i]);
+            buffer_append_str(&buf, "\n");
+        }
+    }
+    if (h->edited_files.count > 0) {
+        buffer_append_str(&buf, "Edited files:\n");
+        for (int i = 0; i < h->edited_files.count; i++) {
+            buffer_append_str(&buf, "- ");
+            buffer_append_str(&buf, h->edited_files.paths[i]);
+            buffer_append_str(&buf, "\n");
+        }
+    }
+
+    if (buf.len == 0) {
+        buffer_free(&buf);
+        return strdup("");
+    }
+    return buffer_steal(&buf);
+}

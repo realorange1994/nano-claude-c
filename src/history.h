@@ -139,12 +139,6 @@ const char **history_get_edited_files(History *h, int *count);
 // Utility
 // ============================================================================
 
-// Get entry count
-int history_count(History *h);
-
-// Get all entries (for debugging/summarization)
-const Entry *history_get_entries(History *h);
-
 // Format file operations for summarization prompt
 char *history_format_file_ops(History *h);
 

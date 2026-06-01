@@ -1,14 +1,14 @@
 #ifndef COMPAT_H
 #define COMPAT_H
 
+#include <stdlib.h>
+
 #ifdef _WIN32
 
 #include <windows.h>
 
 #ifdef _MSC_BUILD
 #include <process.h>
-
-// MSVC lacks these POSIX headers - provide replacements
 
 #ifndef __UNISTD_H__
 #define __UNISTD_H__
@@ -20,7 +20,7 @@
 #endif
 #endif
 
-// Shared UTF-8 to wide string conversion
+// Shared UTF-8 to wide string conversion (needs windows.h and stdlib.h)
 static wchar_t *utf8_to_wide(const char *utf8) {
     if (!utf8) return NULL;
     int size = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
@@ -31,8 +31,13 @@ static wchar_t *utf8_to_wide(const char *utf8) {
     return result;
 }
 
-// Replace sys/time.h - timeval already defined by winsock.h on Windows
-static inline int compat_gettimeofday(struct timeval *tv, void *tz) {
+// Define our own timeval to avoid winsock.h dependency
+struct compat_timeval {
+    long tv_sec;   // seconds
+    long tv_usec;  // microseconds
+};
+
+static inline int compat_gettimeofday(struct compat_timeval *tv, void *tz) {
     (void)tz;
     FILETIME ft;
     unsigned long long t;
@@ -44,7 +49,13 @@ static inline int compat_gettimeofday(struct timeval *tv, void *tz) {
     tv->tv_usec = (long)(t % 1000000);
     return 0;
 }
-#define gettimeofday compat_gettimeofday
+
+// Map struct timeval to our compat version
+// Only define this macro if the caller hasn't already got timeval from winsock
+#ifndef _WINSOCKAPI_
+#define timeval compat_timeval
+#endif
+#define gettimeofday(tv, tz) compat_gettimeofday((struct compat_timeval *)(tv), (tz))
 
 // Replace pthread.h with Windows threads
 typedef struct {
@@ -132,13 +143,13 @@ static inline int pthread_cond_destroy(pthread_cond_t *cond) {
     return 0;
 }
 
-#endif // _MSC_BUILD
+#endif // _WIN32
 
-#else
-// Linux/macOS: POSIX headers available natively
+// Linux/macOS: POSIX headers available natively (only when not on Windows)
+#ifndef _WIN32
 #include <unistd.h>
 #include <sys/time.h>
 #include <pthread.h>
-#endif // _WIN32
+#endif
 
 #endif // COMPAT_H

@@ -434,55 +434,37 @@ static char *build_history_text(REPL *repl) {
     return buf;
 }
 
-static void repl_run_compaction(REPL *repl) {
-    if (!repl) return;
-
-    char *history_text = build_history_text(repl);
-    if (!history_text || !history_text[0]) {
-        free(history_text);
-        printf("[Compaction skipped: no history to summarize]\n");
-        return;
-    }
-
-    char *prompt = malloc(strlen(history_text) + strlen(SUMMARIZATION_PROMPT) + 100);
-    if (!prompt) {
-        free(history_text);
-        printf("[Compaction failed: out of memory]\n");
-        return;
-    }
+static char *repl_summarize_callback(const char *history_text) {
+    // Build prompt with file operations context
+    char *prompt = malloc(strlen(history_text) + strlen(SUMMARIZATION_PROMPT) + 200);
+    if (!prompt) return NULL;
     sprintf(prompt, "%s\n\n%s", SUMMARIZATION_PROMPT, history_text);
-    free(history_text);
 
     cJSON *messages = cJSON_CreateArray();
-    if (!messages) {
-        free(prompt);
-        printf("[Compaction failed: cJSON error]\n");
-        return;
-    }
+    if (!messages) { free(prompt); return NULL; }
     cJSON *msg = cJSON_CreateObject();
-    if (!msg) {
-        cJSON_Delete(messages);
-        free(prompt);
-        printf("[Compaction failed: cJSON error]\n");
-        return;
-    }
+    if (!msg) { cJSON_Delete(messages); free(prompt); return NULL; }
     cJSON_AddItemToObject(msg, "role", cJSON_CreateString("user"));
     cJSON_AddItemToObject(msg, "content", cJSON_CreateString(prompt));
     cJSON_AddItemToArray(messages, msg);
     free(prompt);
 
-    char *summary = provider_chat_sync(repl->provider, messages);
-
+    char *summary = provider_chat_sync(g_repl->provider, messages);
     cJSON_Delete(messages);
+    return summary;
+}
 
-    if (summary && summary[0]) {
-        free(repl->history.summary);
-        repl->history.summary = summary;
-        printf("[History summarized. Continuing...]\n");
-    } else {
-        free(summary);
-        printf("[Compaction failed: no summary generated]\n");
-    }
+static void repl_run_compaction(REPL *repl) {
+    if (!repl) return;
+
+    // history_compact handles everything: build content for summarization,
+    // store summary, cut entries, remove orphaned tool results,
+    // rebuild file operations, update parent IDs
+    history_compact(&repl->history, repl_summarize_callback);
+
+    // Report the new token count
+    int tokens = history_estimate_tokens(&repl->history);
+    printf("[Compaction complete. ~%d tokens remaining]\n", tokens);
 }
 
 // ============================================================================
