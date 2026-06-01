@@ -456,8 +456,6 @@ static void remove_orphaned_tool_results(History *h) {
 void history_compact(History *h, char *(*summarize_fn)(const char *)) {
     if (h->count == 0) return;
 
-    int keep_recent = h->keep_recent_tokens > 0 ? h->keep_recent_tokens : 20000;
-
     // Build old content for summarization (entries before cut)
     Buffer old_content;
     buffer_init(&old_content);

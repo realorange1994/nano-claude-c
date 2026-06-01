@@ -429,7 +429,6 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
         if (tools && tools->count > 0) {
             cJSON *tools_arr = cJSON_CreateArray();
             for (int i = 0; i < tools->count; i++) {
-                Tool *t = tools->tools[i];
                 cJSON *tool_def = build_anthropic_tool(tools->tools[i]);
                 if (tool_def) cJSON_AddItemToArray(tools_arr, tool_def);
             }

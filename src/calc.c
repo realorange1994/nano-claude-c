@@ -362,9 +362,6 @@ static double parse_factor(Parser *p) {
             
             // Check if this is a function or variable
             if (p->current.type == TOKEN_LPAREN) {
-                // Check if it's a known function by testing eval_func
-                double test_args[1] = {0};
-                double fn_result = eval_func(name, test_args, 0);
                 
                 // If eval_func returns 0 with 0 args, it's not a function (or is a function that returns 0)
                 // We need a better way to check if it's a function...
