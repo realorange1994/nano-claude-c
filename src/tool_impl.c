@@ -156,34 +156,6 @@ static long long get_time_ms(void) {
     return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
-// Convert GBK (CP936) output from bash to UTF-8 for proper Chinese display
-static char *convert_gbk_to_utf8(const char *input) {
-    if (!input) return NULL;
-
-    // First convert GBK to UTF-16
-    int wlen = MultiByteToWideChar(936, 0, input, -1, NULL, 0);
-    if (wlen == 0) return strdup(input);  // Fallback: return as-is
-
-    wchar_t *wbuf = malloc(wlen * sizeof(wchar_t));
-    if (!wbuf) return strdup(input);
-
-    MultiByteToWideChar(936, 0, input, -1, wbuf, wlen);
-
-    // Then convert UTF-16 to UTF-8
-    int ulen = WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, NULL, 0, NULL, NULL);
-    if (ulen == 0) {
-        free(wbuf);
-        return strdup(input);
-    }
-
-    char *result = malloc(ulen);
-    if (result) {
-        WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, result, ulen, NULL, NULL);
-    }
-    free(wbuf);
-    return result ? result : strdup(input);
-}
-
 // Strip ANSI terminal escape codes (colors, cursor movement, etc.)
 static char *strip_ansi_codes(const char *input) {
     if (!input) return NULL;
@@ -986,7 +958,10 @@ char *tool_exec(cJSON *input, char **error) {
         free(env_vars);
     }
 
-    // Escape command for bash -c '...'
+    // Escape command for bash -c "..."
+    // We use double quotes to wrap the command because CreateProcessW's CRT
+    // argument parsing only understands double quotes (not single quotes).
+    // Inner double quotes are escaped as \" for bash.
     int cmdlen = strlen(command);
     char *escaped = malloc(cmdlen * 4 + 1);
     if (!escaped) {
@@ -996,11 +971,9 @@ char *tool_exec(cJSON *input, char **error) {
     }
     int j = 0;
     for (int i = 0; i < cmdlen; i++) {
-        if (command[i] == '\'') {
-            escaped[j++] = '\'';
+        if (command[i] == '"') {
             escaped[j++] = '\\';
-            escaped[j++] = '\'';
-            escaped[j++] = '\'';
+            escaped[j++] = '"';
         } else {
             escaped[j++] = command[i];
         }
@@ -1062,8 +1035,8 @@ char *tool_exec(cJSON *input, char **error) {
         final_cmd = escaped;
     }
 
-    // Build command line: "bash" -c 'command' or with cd prefix
-    char cmd_line[8192];
+    // Build command line: "bash" -c "command" (double quotes for CreateProcessW)
+    char cmd_line[16384];
     if (work_dir && strlen(work_dir) > 0) {
         // Convert Windows path to POSIX for bash
         char posix_dir[512];
@@ -1080,22 +1053,19 @@ char *tool_exec(cJSON *input, char **error) {
             }
         }
         posix_dir[pi] = '\0';
-        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c 'cd %s && %s'", bash_exe, posix_dir, final_cmd);
+        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c \"cd %s && %s\"", bash_exe, posix_dir, final_cmd);
     } else {
-        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c '%s'", bash_exe, final_cmd);
+        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c \"%s\"", bash_exe, final_cmd);
     }
     
     if (final_cmd != escaped) free(final_cmd);
     free(escaped);
 
     // Create pipes for stdout and stderr
-    STARTUPINFOA si;
     PROCESS_INFORMATION pi;
     SECURITY_ATTRIBUTES sa;
     HANDLE hReadOut, hWriteOut, hReadErr, hWriteErr;
 
-    memset(&si, 0, sizeof(si));
-    si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
 
     sa.nLength = sizeof(SECURITY_ATTRIBUTES);
@@ -1118,22 +1088,38 @@ char *tool_exec(cJSON *input, char **error) {
     }
     SetHandleInformation(hReadErr, HANDLE_FLAG_INHERIT, 0);
 
-    si.hStdOutput = hWriteOut;
-    si.hStdError = hWriteErr;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    si.dwFlags = STARTF_USESTDHANDLES;
+    // Convert UTF-8 command line to wide chars for CreateProcessW.
+    // CreateProcessA interprets the command line as ANSI (GBK on Chinese Windows),
+    // which corrupts UTF-8 multi-byte sequences. CreateProcessW preserves Unicode.
+    STARTUPINFOW siw;
+    memset(&siw, 0, sizeof(siw));
+    siw.cb = sizeof(siw);
+    siw.dwFlags = STARTF_USESTDHANDLES;
+    siw.hStdOutput = hWriteOut;
+    siw.hStdError = hWriteErr;
+    siw.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
-    if (!CreateProcessA(NULL, cmd_line, NULL, NULL, TRUE,
+    wchar_t *w_cmd_line = utf8_to_wide(cmd_line);
+    wchar_t *w_work_dir = work_dir ? utf8_to_wide(work_dir) : NULL;
+
+    if (!CreateProcessW(NULL, w_cmd_line, NULL, NULL, TRUE,
                         CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
-                        env_block, work_dir, &si, &pi)) {
+                        NULL, w_work_dir, &siw, &pi)) {
+        DWORD err = GetLastError();
         CloseHandle(hReadOut);
         CloseHandle(hWriteOut);
         CloseHandle(hReadErr);
         CloseHandle(hWriteErr);
+        free(w_cmd_line);
+        free(w_work_dir);
         free(env_block);
-        *error = strdup("failed to create process");
+        char errbuf[128];
+        snprintf(errbuf, sizeof(errbuf), "failed to create process (error %lu)", err);
+        *error = strdup(errbuf);
         return NULL;
     }
+    free(w_cmd_line);
+    free(w_work_dir);
     free(env_block);
 
     CloseHandle(hWriteOut);  // Close write end in parent (stdout)
@@ -1242,16 +1228,12 @@ char *tool_exec(cJSON *input, char **error) {
     CloseHandle(hReadOut);
     CloseHandle(hReadErr);
 
-    // Convert GBK output to UTF-8 for proper Chinese display
-    // Steal buffer data to avoid use-after-free
-    char *result = buf.data ? buf.data : strdup("");
+    char *utf8_result = buf.data ? buf.data : strdup("");
     buf.data = NULL;
     buf.len = 0;
     buf.capacity = 0;
     buffer_free(&buf);
-    char *utf8_result = convert_gbk_to_utf8(result);
-    free(result);
-    
+
     // Strip ANSI terminal codes
     char *clean_result = strip_ansi_codes(utf8_result);
     free(utf8_result);
