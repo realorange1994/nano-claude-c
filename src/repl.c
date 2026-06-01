@@ -40,7 +40,7 @@ static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
 
 
 
-        // Double Ctrl+C within 1.5s → exit immediately (like miniclaude)
+        // Double Ctrl+C within 1.5s -> exit immediately (like miniclaude)
 
         if (last > 0 && now - last < 1500) {
 

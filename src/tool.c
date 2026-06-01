@@ -229,7 +229,7 @@ void tool_register_builtins(ToolRegistry *reg) {
         "SAFETY: Dangerous patterns (rm -rf /, fork bombs, git reset --hard, docker system prune) are blocked. "
         "Output is truncated to last 2000 lines or 50KB. "
         "Use the env parameter to set environment variables. "
-        "IMPORTANT: stdin is disconnected �� commands requiring user input (password prompts, y/n) will be killed with stall detection. "
+        "IMPORTANT: stdin is disconnected    commands requiring user input (password prompts, y/n) will be killed with stall detection. "
         "Use non-interactive flags instead (e.g., sudo -S, apt-get -y, echo y | command, --yes).",
         shell_schema, tool_exec);
 
