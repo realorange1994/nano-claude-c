@@ -96,20 +96,16 @@ char *provider_chat_sync(Provider *p, cJSON *messages) {
     }
     
     if (!json_body) return NULL;
-    
+
     char *response = http_post(url, headers, json_body, 120000);
     free(json_body);
-    fprintf(stderr, "[DEBUG] provider_chat_sync: http_post returned, response=%s\n", response ? "non-null" : "NULL");
 
     if (!response) return NULL;
 
-    fprintf(stderr, "[DEBUG] provider_chat_sync: about to parse JSON: %.50s\n", response);
     cJSON *json = cJSON_Parse(response);
-    fprintf(stderr, "[DEBUG] provider_chat_sync: cJSON_Parse result: %p\n", (void*)json);
     free(response);
-    
+
     if (!json) {
-        fprintf(stderr, "[DEBUG] provider_chat_sync: JSON parse failed\n");
         return NULL;
     }
 
@@ -117,7 +113,6 @@ char *provider_chat_sync(Provider *p, cJSON *messages) {
 
     if (p->type == PROVIDER_ANTHROPIC) {
         cJSON *content_arr = cJSON_GetObjectItem(json, "content");
-        fprintf(stderr, "[DEBUG] provider_chat_sync: content_arr = %p\n", (void*)content_arr);
         if (content_arr && cJSON_GetArraySize(content_arr) > 0) {
             cJSON *item = cJSON_GetArrayItem(content_arr, 0);
             if (item) {
@@ -129,7 +124,6 @@ char *provider_chat_sync(Provider *p, cJSON *messages) {
         }
     } else {
         cJSON *choices = cJSON_GetObjectItem(json, "choices");
-        fprintf(stderr, "[DEBUG] provider_chat_sync: choices = %p\n", (void*)choices);
         if (choices && cJSON_GetArraySize(choices) > 0) {
             cJSON *choice = cJSON_GetArrayItem(choices, 0);
             if (choice) {
@@ -143,9 +137,8 @@ char *provider_chat_sync(Provider *p, cJSON *messages) {
             }
         }
     }
-    
+
     cJSON_Delete(json);
-    fprintf(stderr, "[DEBUG] provider_chat_sync: returning content=%s, len=%zu\n", content ? "non-null" : "NULL", content ? strlen(content) : 0);
     return content;
 }
 
@@ -211,9 +204,6 @@ static void stream_context_append_tool_input(StreamContext *ctx, const char *dat
 static void stream_flush_tool(StreamContext *ctx) {
     if (!ctx->in_tool_use) return;
 
-    fprintf(stderr, "[DEBUG] stream_flush_tool: name='%s' id='%s' input_len=%zu\n",
-            ctx->current_tool_name, ctx->current_tool_id, ctx->tool_input_len);
-
     // Parse JSON tool input with recovery for incomplete/partial JSON
     // (like miniclaude's parseAnthropicJSONArgs)
     char *input_json = NULL;
@@ -268,7 +258,6 @@ static void stream_flush_tool(StreamContext *ctx) {
                             if (parsed) {
                                 input_json = cJSON_PrintUnformatted(parsed);
                                 cJSON_Delete(parsed);
-                                fprintf(stderr, "[DEBUG] recovered JSON from offset %zu, len=%zu\n", start, json_len);
                             }
                             free(json_str);
                             goto done_json_recovery;
@@ -278,9 +267,7 @@ static void stream_flush_tool(StreamContext *ctx) {
             }
 
 done_json_recovery:
-            if (!input_json) {
-                fprintf(stderr, "[DEBUG] JSON recovery failed, raw: %.200s\n", ctx->tool_input_buf);
-            }
+            ;
         }
     }
     if (!input_json) {
@@ -292,7 +279,6 @@ done_json_recovery:
     chunk.tool_name = ctx->current_tool_name;
     chunk.tool_id = ctx->current_tool_id;
     chunk.tool_input = input_json;
-    fprintf(stderr, "[DEBUG] flushing tool call: name='%s' input_len=%zu\n", ctx->current_tool_name, strlen(input_json));
     ctx->callback(&chunk, ctx->userdata);
     free(input_json);
 

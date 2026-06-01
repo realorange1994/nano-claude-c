@@ -1321,34 +1321,36 @@ int repl_run(REPL *repl) {
                 char *error = NULL;
                 char *result = NULL;
 
-                printf("[T0] before tool_execute\n"); fflush(stdout);
                 result = tool_execute(repl->tools, repl->pending_tool_names[i], args, &error);
-                printf("[T1] tool_execute done: result=%p error=%p\n", (void*)result, (void*)error); fflush(stdout);
 
                 if (args) cJSON_Delete(args);
 
                 if (result) {
-                    printf("[T2] result='%s'\n", result); fflush(stdout);
                     history_add_tool_result(&repl->history, repl->pending_tool_ids[i],
                                     repl->pending_tool_names[i], result);
-                    printf("[T3] history added\n"); fflush(stdout);
                     size_t rlen = strlen(result);
                     if (rlen > 50000) rlen = 50000;
                     for (size_t j = 0; j < rlen; j++) {
                         unsigned char c = (unsigned char)result[j];
                         if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') result[j] = ' ';
                     }
-                    printf("[T4] sanitize done\n"); fflush(stdout);
                     printf("%.*s\n", (int)rlen, result);
                     fflush(stdout);
-                    printf("[T5] printf done\n"); fflush(stdout);
                     free(result);
-                    printf("[T6] free done\n"); fflush(stdout);
                     result = NULL;
                 } else if (error) {
                     printf("Error: %s\n", error);
+                    // Must add tool result even on error - API requires every tool_use to have a result
+                    char errbuf[512];
+                    snprintf(errbuf, sizeof(errbuf), "Error: %s", error);
+                    history_add_tool_result(&repl->history, repl->pending_tool_ids[i],
+                                    repl->pending_tool_names[i], errbuf);
                     free(error);
                     error = NULL;
+                } else {
+                    // No result and no error - still need to provide a tool result
+                    history_add_tool_result(&repl->history, repl->pending_tool_ids[i],
+                                    repl->pending_tool_names[i], "(no output)");
                 }
 
             }  // end for i

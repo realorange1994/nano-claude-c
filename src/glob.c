@@ -110,6 +110,17 @@ static void walk_directory(const char *start_dir, const char *file_pattern, Glob
 
             int is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
+            // Push subdirectory onto stack FIRST (before type filter, so we always recurse)
+            if (is_dir && !should_skip_dir(fd.cFileName)) {
+                DirEntry *sub = calloc(1, sizeof(DirEntry));
+                if (sub) {
+                    strncpy(sub->path, full_path, MAX_PATH - 1);
+                    sub->next = stack;
+                    stack = sub;
+                }
+            }
+
+            // Apply type filter for output (but directories still get traversed above)
             if (cfg->type_filter == GLOB_TYPE_FILE && is_dir) continue;
             if (cfg->type_filter == GLOB_TYPE_DIR && !is_dir) continue;
 
@@ -120,16 +131,6 @@ static void walk_directory(const char *start_dir, const char *file_pattern, Glob
                 result->count++;
 
                 if (cfg->max_results > 0 && result->count >= cfg->max_results) break;
-            }
-
-            // Push subdirectory onto stack
-            if (is_dir && !should_skip_dir(fd.cFileName)) {
-                DirEntry *sub = calloc(1, sizeof(DirEntry));
-                if (sub) {
-                    strncpy(sub->path, full_path, MAX_PATH - 1);
-                    sub->next = stack;
-                    stack = sub;
-                }
             }
         } while (FindNextFileA(h, &fd) && !is_output_full(result));
 
@@ -155,31 +156,70 @@ GlobResult *glob_search(GlobConfig *cfg) {
     result->count = 0;
 
     const char *dir = cfg->path ? cfg->path : ".";
+    char dir_buf[MAX_PATH];  // Buffer for constructed dir paths
     const char *pattern = cfg->pattern;
+    int recursive = 0;
 
-    // Check if pattern has path separator
-    const char *last_sep = strrchr(pattern, '/');
-    if (!last_sep) last_sep = strrchr(pattern, '\\');
-
-    if (last_sep && last_sep != pattern) {
-        size_t dir_len = last_sep - pattern;
-        char dir_part[512] = {0};
-        strncpy(dir_part, pattern, dir_len);
-
-        if (dir_part[0] == '/' || dir_part[0] == '\\' ||
-            (strlen(dir) == 1 && dir[0] == '.')) {
-            dir = dir_part;
+    // Handle ** patterns: ** means recursive, strip it from pattern
+    // e.g. "**/*.c" -> recursive search for "*.c" starting from dir
+    // e.g. "src/**/*.c" -> recursive search for "*.c" starting from "src"
+    const char *doublestar = strstr(pattern, "**");
+    if (doublestar) {
+        recursive = 1;
+        // Check what comes before **
+        if (doublestar == pattern || (doublestar == pattern + 1 && pattern[0] == '/')) {
+            // "**/*.c" or "/**/*.c" -> search from dir for *.c recursively
+            const char *after = doublestar + 2;
+            while (*after == '/') after++;  // skip slashes after **
+            if (*after) {
+                pattern = after;
+            } else {
+                pattern = "*";
+            }
         } else {
-            char combined[MAX_PATH];
-            snprintf(combined, sizeof(combined), "%s\\%s", dir, dir_part);
-            strncpy(dir_part, combined, sizeof(dir_part) - 1);
-            dir = dir_part;
+            // "src/**/*.c" -> dir="src", pattern="*.c", recursive
+            size_t prefix_len = doublestar - pattern;
+            // Strip trailing slash from prefix
+            while (prefix_len > 0 && (pattern[prefix_len-1] == '/' || pattern[prefix_len-1] == '\\'))
+                prefix_len--;
+            if (prefix_len > 0) {
+                strncpy(dir_buf, pattern, prefix_len);
+                dir_buf[prefix_len] = '\0';
+                dir = dir_buf;
+            }
+            const char *after = doublestar + 2;
+            while (*after == '/') after++;
+            if (*after) {
+                pattern = after;
+            } else {
+                pattern = "*";
+            }
         }
-        pattern = last_sep + 1;
+    } else {
+        // No ** - check if pattern has path separator for non-recursive patterns
+        // e.g. "src/*.c" -> dir="src", pattern="*.c"
+        const char *last_sep = strrchr(pattern, '/');
+        if (!last_sep) last_sep = strrchr(pattern, '\\');
+
+        if (last_sep && last_sep != pattern) {
+            size_t dir_len = last_sep - pattern;
+            strncpy(dir_buf, pattern, dir_len);
+            dir_buf[dir_len] = '\0';
+
+            if (dir_buf[0] == '/' || dir_buf[0] == '\\' ||
+                (strlen(dir) == 1 && dir[0] == '.')) {
+                dir = dir_buf;
+            } else {
+                char combined[MAX_PATH];
+                snprintf(combined, sizeof(combined), "%s\\%s", dir, dir_buf);
+                strncpy(dir_buf, combined, sizeof(dir_buf) - 1);
+                dir = dir_buf;
+            }
+            pattern = last_sep + 1;
+        }
     }
 
-    // Check if recursive (**)
-    if (strstr(cfg->pattern, "**")) {
+    if (recursive) {
         walk_directory(dir, pattern, cfg, result);
     } else {
         // Non-recursive

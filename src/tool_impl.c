@@ -898,7 +898,6 @@ char *tool_exec(cJSON *input, char **error) {
         "E:/Git/bin/bash.exe",
         "C:/Program Files/Git/bin/bash.exe",
         "C:/Program Files (x86)/Git/bin/bash.exe",
-        "bash",
         NULL
     };
 
