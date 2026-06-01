@@ -24,12 +24,21 @@ typedef struct ToolRegistry ToolRegistry;
 // Tool function signature
 typedef char* (*ToolFunc)(cJSON *input, char **error);
 
+// MCP Tool binding (allows tool_execute to call MCP tools)
+typedef struct MCPClient MCPClient;
+typedef struct MCPToolBinding MCPToolBinding;
+struct MCPToolBinding {
+    MCPClient *mcp;
+    char *tool_name;
+};
+
 // Tool definition
 struct Tool {
     const char *name;
     const char *description;
     cJSON *input_schema;  // JSON Schema for the tool
     ToolFunc func;
+    MCPToolBinding *mcp_binding;  // Non-NULL for MCP tools
 };
 
 // Tool registry
@@ -45,6 +54,10 @@ void tool_registry_free(ToolRegistry *reg);
 // Register a tool
 bool tool_register(ToolRegistry *reg, const char *name, const char *description,
                    cJSON *input_schema, ToolFunc func);
+
+// Register an MCP tool (stores binding as the tool's func context)
+bool tool_registry_register_mcp(ToolRegistry *reg, const char *name, const char *description,
+                                 cJSON *input_schema, ToolFunc func, MCPToolBinding *binding);
 
 // Find a tool
 Tool *tool_find(ToolRegistry *reg, const char *name);

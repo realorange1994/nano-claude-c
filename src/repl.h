@@ -54,8 +54,8 @@ char *repl_read_line_interruptible(REPL *repl);
 // This is called from a signal context and must be async-signal-safe.
 void repl_console_ctrl_handler(REPL *repl);
 
-// Add MCP client
-bool repl_add_mcp(REPL *repl, const char *name, const char *command);
+// Add MCP client (registers MCP tools into the tool registry)
+bool repl_add_mcp(REPL *repl, ToolRegistry *tools, const char *name, const char *command);
 
 // Run the REPL
 int repl_run(REPL *repl);

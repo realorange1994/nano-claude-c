@@ -28,4 +28,7 @@ char *buffer_c_str(Buffer *buf);
 bool buffer_starts_with(Buffer *buf, const char *prefix);
 size_t buffer_len(Buffer *buf);
 
+// Steal ownership (returns data, sets buffer to empty)
+char *buffer_steal(Buffer *buf);
+
 #endif // BUFFER_H

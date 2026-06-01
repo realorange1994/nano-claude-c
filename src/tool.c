@@ -1,4 +1,5 @@
 #include "tool.h"
+#include "jsonrpc.h"
 #include "buffer.h"
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,10 @@ void tool_registry_free(ToolRegistry *reg) {
     if (!reg) return;
     for (int i = 0; i < reg->count; i++) {
         Tool *t = reg->tools[i];
+        if (t->mcp_binding) {
+            free(t->mcp_binding->tool_name);
+            free(t->mcp_binding);
+        }
         free((void*)t->name);
         free((void*)t->description);
         cJSON_Delete(t->input_schema);
@@ -36,11 +41,27 @@ bool tool_register(ToolRegistry *reg, const char *name, const char *description,
     if (reg->count >= MAX_TOOLS) return false;
     Tool *t = calloc(1, sizeof(Tool));
     if (!t) return false;
-    
+
     t->name = name ? strdup(name) : NULL;
     t->description = description ? strdup(description) : NULL;
     t->input_schema = input_schema;
     t->func = func;
+    t->mcp_binding = NULL;
+    reg->tools[reg->count++] = t;
+    return true;
+}
+
+bool tool_registry_register_mcp(ToolRegistry *reg, const char *name, const char *description,
+                                 cJSON *input_schema, ToolFunc func, MCPToolBinding *binding) {
+    if (reg->count >= MAX_TOOLS) return false;
+    Tool *t = calloc(1, sizeof(Tool));
+    if (!t) return false;
+
+    t->name = name;  // already strdup'd by caller
+    t->description = description;  // already strdup'd by caller
+    t->input_schema = input_schema;
+    t->func = NULL;  // MCP tools are dispatched directly in tool_execute
+    t->mcp_binding = binding;
     reg->tools[reg->count++] = t;
     return true;
 }
@@ -106,12 +127,42 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
     }
 
     if (!should_skip) {
-        __try {
-            result = tool->func(args, error);
-        } __except(EXCEPTION_EXECUTE_HANDLER) {
-            if (result) { free(result); result = NULL; }
-            if (error && !*error) {
-                *error = strdup("tool crashed and was recovered");
+        if (tool->mcp_binding) {
+            // MCP tool - call via jsonrpc
+            MCPToolBinding *b = tool->mcp_binding;
+            cJSON *result_obj = mcp_call_tool(b->mcp, b->tool_name, args);
+            if (result_obj) {
+                // Extract text content from MCP result
+                cJSON *content_arr = cJSON_GetObjectItem(result_obj, "content");
+                if (content_arr && cJSON_GetArraySize(content_arr) > 0) {
+                    Buffer mcp_buf;
+                    buffer_init(&mcp_buf);
+                    int arr_size = cJSON_GetArraySize(content_arr);
+                    for (int ci = 0; ci < arr_size; ci++) {
+                        cJSON *citem = cJSON_GetArrayItem(content_arr, ci);
+                        cJSON *ctype = cJSON_GetObjectItem(citem, "type");
+                        if (ctype && ctype->valuestring && strcmp(ctype->valuestring, "text") == 0) {
+                            cJSON *ctext = cJSON_GetObjectItem(citem, "text");
+                            if (ctext && ctext->valuestring) {
+                                buffer_append_str(&mcp_buf, ctext->valuestring);
+                            }
+                        }
+                    }
+                    result = buffer_steal(&mcp_buf);
+                }
+                cJSON_Delete(result_obj);
+            }
+            if (!result && error && !*error) {
+                *error = strdup("MCP tool returned no result");
+            }
+        } else {
+            __try {
+                result = tool->func(args, error);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                if (result) { free(result); result = NULL; }
+                if (error && !*error) {
+                    *error = strdup("tool crashed and was recovered");
+                }
             }
         }
     }

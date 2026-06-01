@@ -130,7 +130,7 @@ int main(int argc, char *argv[]) {
     
     // Add MCP servers from config
     for (int i = 0; i < g_config.mcp_count; i++) {
-        if (repl_add_mcp(repl, g_config.mcp_servers[i].name, g_config.mcp_servers[i].command)) {
+        if (repl_add_mcp(repl, tools, g_config.mcp_servers[i].name, g_config.mcp_servers[i].command)) {
             printf("Connected to MCP server: %s\n", g_config.mcp_servers[i].name);
         } else {
             fprintf(stderr, "Failed to connect to MCP server: %s\n", g_config.mcp_servers[i].name);

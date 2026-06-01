@@ -469,7 +469,7 @@ char *repl_read_line_interruptible(REPL *repl) {
 
 
 
-bool repl_add_mcp(REPL *repl, const char *name, const char *command) {
+bool repl_add_mcp(REPL *repl, ToolRegistry *tools, const char *name, const char *command) {
 
     if (repl->mcp_count >= MAX_MCP_CLIENTS) return false;
 
@@ -491,25 +491,66 @@ bool repl_add_mcp(REPL *repl, const char *name, const char *command) {
 
 
 
-    cJSON *tools = mcp_list_tools(mcp);
+    cJSON *mcp_tools = mcp_list_tools(mcp);
+    int registered = 0;
 
-    if (tools) {
+    if (mcp_tools) {
+        // mcp_list_tools returns the tools array directly (not wrapped in {"tools": [...]})
+        int count = cJSON_GetArraySize(mcp_tools);
 
-        cJSON *tool_arr = cJSON_GetObjectItem(tools, "tools");
+        for (int i = 0; i < count; i++) {
 
-        if (tool_arr) {
+            cJSON *t = cJSON_GetArrayItem(mcp_tools, i);
 
-            int count = cJSON_GetArraySize(tool_arr);
+            cJSON *tname = cJSON_GetObjectItem(t, "name");
 
-            for (int i = 0; i < count; i++) {
+            if (tname && tname->valuestring) {
 
-                cJSON *t = cJSON_GetArrayItem(tool_arr, i);
+                cJSON *tdesc = cJSON_GetObjectItem(t, "description");
 
-                cJSON *tname = cJSON_GetObjectItem(t, "name");
+                cJSON *ischema = cJSON_GetObjectItem(t, "input_schema");
 
-                if (tname && tname->valuestring) {
 
-                    fprintf(stderr, "[DEBUG] Found MCP tool: %s\n", tname->valuestring);
+
+                char *tool_name = strdup(tname->valuestring);
+
+                char *tool_desc = tdesc ? strdup(tdesc->valuestring) : strdup("MCP tool");
+
+                cJSON *schema_copy = ischema ? cJSON_Duplicate(ischema, 1) : cJSON_CreateObject();
+
+
+
+                MCPToolBinding *binding = calloc(1, sizeof(MCPToolBinding));
+
+                if (binding) {
+
+                    binding->mcp = mcp;
+
+                    binding->tool_name = strdup(tname->valuestring);
+
+
+
+                    if (tools) {
+
+                        if (!tool_registry_register_mcp(tools, tool_name, tool_desc, schema_copy, NULL, binding)) {
+
+                            free(tool_name);
+
+                            free(tool_desc);
+
+                            cJSON_Delete(schema_copy);
+
+                            free(binding->tool_name);
+
+                            free(binding);
+
+                        } else {
+
+                            registered++;
+
+                        }
+
+                    }
 
                 }
 
@@ -517,7 +558,9 @@ bool repl_add_mcp(REPL *repl, const char *name, const char *command) {
 
         }
 
-        cJSON_Delete(tools);
+        cJSON_Delete(mcp_tools);
+
+        fprintf(stderr, "[MCP] registered %d tools from %s\n", registered, name);
 
     }
 
@@ -1007,7 +1050,18 @@ static void print_tool_action(const char *name, cJSON *input) {
 
     } else {
 
-        printf("[%s]", name);
+        // MCP or unknown tools - print with their input params
+        printf("Calling: %s", name);
+        if (input) {
+            char *json = cJSON_PrintUnformatted(input);
+            if (json && json[0]) {
+                // Truncate long JSON for display
+                size_t jlen = strlen(json);
+                if (jlen > 200) jlen = 200;
+                printf(" (%.*s%s)", (int)jlen, json, (jlen != strlen(json)) ? "..." : "");
+            }
+            free(json);
+        }
 
     }
 

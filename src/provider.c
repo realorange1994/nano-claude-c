@@ -448,8 +448,11 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
 
         // Add tools from registry so the model knows what tools are available
         if (tools && tools->count > 0) {
+            fprintf(stderr, "[PROVIDER] adding %d tools to request\n", tools->count);
             cJSON *tools_arr = cJSON_CreateArray();
             for (int i = 0; i < tools->count; i++) {
+                Tool *t = tools->tools[i];
+                fprintf(stderr, "[PROVIDER] tool[%d]: %s (mcp_binding=%p)\n", i, t ? t->name : "(null)", t ? (void*)t->mcp_binding : (void*)0);
                 cJSON *tool_def = build_anthropic_tool(tools->tools[i]);
                 if (tool_def) cJSON_AddItemToArray(tools_arr, tool_def);
             }

@@ -121,3 +121,12 @@ bool buffer_starts_with(Buffer *buf, const char *prefix) {
     size_t prefix_len = strlen(prefix);
     return buf->len >= prefix_len && memcmp(buf->data, prefix, prefix_len) == 0;
 }
+
+char *buffer_steal(Buffer *buf) {
+    if (!buf || !buf->data) return strdup("");
+    char *data = buf->data;
+    buf->data = NULL;
+    buf->len = 0;
+    buf->capacity = 0;
+    return data;
+}

@@ -27,60 +27,90 @@ static int next_id(MCPClient *mcp) {
 static char *read_response_with_timeout(MCPClient *mcp) {
     Buffer buf;
     buffer_init(&buf);
-    
+
     DWORD start_time = GetTickCount();
     char chunk[4096];
     DWORD bytes_read;
-    
+
     while (GetTickCount() - start_time < MCP_TIMEOUT_MS) {
         // Check if process is still alive
         if (WaitForSingleObject(mcp->proc_info.hProcess, 0) != WAIT_TIMEOUT) {
             buffer_free(&buf);
             return NULL;  // Process died
         }
-        
+
         // Try to read with small timeout
         DWORD avail = 0;
         if (!PeekNamedPipe(mcp->stdout_fd, NULL, 0, NULL, &avail, NULL) || avail == 0) {
-            Sleep(10);  // No data, wait a bit
+            Sleep(50);  // No data, wait a bit longer
             continue;
         }
-        
+
         if (ReadFile(mcp->stdout_fd, chunk, sizeof(chunk) - 1, &bytes_read, NULL) && bytes_read > 0) {
+            // Validate: all bytes must be printable ASCII or whitespace/newline
+            bool valid = true;
+            for (DWORD i = 0; i < bytes_read; i++) {
+                unsigned char c = (unsigned char)chunk[i];
+                if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) continue;  // Skip non-text data
+
             chunk[bytes_read] = '\0';
             buffer_append(&buf, chunk, bytes_read);
-            
-            // Check if we have complete JSON (look for newline or complete object)
+
+            // Try to extract a complete JSON object
             char *str = buffer_c_str(&buf);
-            
-            // Strip "data: " prefix if present
-            if (strncmp(str, "data: ", 6) == 0) {
-                memmove(str, str + 6, strlen(str + 6) + 1);
+            size_t slen = strlen(str);
+
+            // Find the first '{'
+            char *first_brace = strchr(str, '{');
+            if (!first_brace) {
+                // No '{' found - truncate buffer to avoid growing with non-JSON garbage
+                if (slen > 1024) {
+                    buf.data[0] = '\0';
+                    buf.len = 0;
+                }
+                continue;
             }
-            
-            // Try to parse JSON
-            cJSON *resp = cJSON_Parse(str);
-            if (resp) {
-                char *result = cJSON_Print(resp);
-                cJSON_Delete(resp);
-                buffer_free(&buf);
-                return result;
-            }
-            
-            // Check if we have complete JSON object (even if partial parsing fails)
-            // Look for balanced braces
-            int brace_count = 0;
-            for (size_t i = 0; i < strlen(str); i++) {
-                if (str[i] == '{') brace_count++;
-                else if (str[i] == '}') brace_count--;
-                if (brace_count == 0 && i > 0) {
-                    // Complete JSON object found
-                    char *complete = malloc(i + 2);
-                    if (complete) {
-                        strncpy(complete, str, i + 1);
-                        complete[i + 1] = '\0';
-                        buffer_free(&buf);
-                        return complete;
+
+            // Count braces to find matching '}'
+            int depth = 0;
+            int in_string = 0;
+            int escaped = 0;
+            for (char *p = first_brace; *p; p++) {
+                unsigned char c = (unsigned char)*p;
+
+                if (escaped) {
+                    escaped = 0;
+                    continue;
+                }
+                if (c == '\\' && in_string) {
+                    escaped = 1;
+                    continue;
+                }
+                if (c == '"') {
+                    in_string = !in_string;
+                    continue;
+                }
+                if (in_string) continue;
+
+                if (c == '{') depth++;
+                else if (c == '}') {
+                    depth--;
+                    if (depth == 0) {
+                        // Complete JSON object from first_brace to p
+                        size_t json_len = (size_t)(p - first_brace) + 1;
+                        char *complete = malloc(json_len + 1);
+                        if (complete) {
+                            memcpy(complete, first_brace, json_len);
+                            complete[json_len] = '\0';
+                            buffer_free(&buf);
+                            return complete;
+                        }
+                        goto done;
                     }
                 }
             }
@@ -88,20 +118,23 @@ static char *read_response_with_timeout(MCPClient *mcp) {
             break;  // Read error
         }
     }
-    
+
+done:
     buffer_free(&buf);
     return NULL;  // Timeout
 }
 
 static char *send_request(MCPClient *mcp, cJSON *request) {
-    char *json_str = cJSON_Print(request);
+    // Use PrintUnformatted to generate single-line JSON (MCP servers
+    // read stdin line-by-line; multi-line JSON from cJSON_Print breaks this)
+    char *json_str = cJSON_PrintUnformatted(request);
     if (!json_str) return NULL;
-    
+
     DWORD written;
     WriteFile(mcp->stdin_fd, json_str, (DWORD)strlen(json_str), &written, NULL);
     WriteFile(mcp->stdin_fd, "\n", 1, &written, NULL);
     FlushFileBuffers(mcp->stdin_fd);
-    
+
     free(json_str);
     
     // Read response with timeout
@@ -138,12 +171,12 @@ MCPClient *mcp_client_new(const char *name, const char *command) {
 
 void mcp_client_free(MCPClient *mcp) {
     if (!mcp) return;
-    
+
     if (mcp->stdin_fd) CloseHandle(mcp->stdin_fd);
     if (mcp->stdout_fd) CloseHandle(mcp->stdout_fd);
     if (mcp->proc_info.hProcess) CloseHandle(mcp->proc_info.hProcess);
     if (mcp->proc_info.hThread) CloseHandle(mcp->proc_info.hThread);
-    
+
     free(mcp->name);
     free(mcp->command);
     free(mcp);
@@ -156,43 +189,66 @@ const char *mcp_client_name(MCPClient *mcp) {
 bool mcp_initialize(MCPClient *mcp) {
     if (!mcp || mcp->initialized) return true;
     
-    // Create pipes for stdin/stdout
+    // Create pipes for stdin/stdout/stderr
     SECURITY_ATTRIBUTES sa = {0};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
-    
+
     HANDLE stdin_read, stdin_write;
     HANDLE stdout_read, stdout_write;
-    
+    HANDLE stderr_read, stderr_write;
+
     if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) return false;
     if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0)) {
         CloseHandle(stdin_read); CloseHandle(stdin_write);
         return false;
     }
-    
+    if (!CreatePipe(&stderr_read, &stderr_write, &sa, 0)) {
+        CloseHandle(stdin_read); CloseHandle(stdin_write);
+        CloseHandle(stdout_read); CloseHandle(stdout_write);
+        return false;
+    }
+
     // Set handle information for stdin_write and stdout_read to not be inherited
     SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
-    
+    SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
+
     // Start the process
     STARTUPINFOA si = {0};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = stdin_read;
     si.hStdOutput = stdout_write;
-    si.hStdError = stdout_write;
-    
+    si.hStdError = stderr_write;
+
+    // Wrap command with cmd.exe /c so CreateProcessA can find python.exe
+    // (WindowsApps aliases like python.exe are NOT real executables and
+    // CreateProcessA cannot launch them directly)
+    size_t cmd_len = strlen(mcp->command) + 32;
+    char *wrapped_cmd = malloc(cmd_len);
+    if (wrapped_cmd) {
+        snprintf(wrapped_cmd, cmd_len, "cmd.exe /c %s", mcp->command);
+        free(mcp->command);
+        mcp->command = wrapped_cmd;
+    }
+
     if (!CreateProcessA(NULL, mcp->command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &mcp->proc_info)) {
+        DWORD err = GetLastError();
+        fprintf(stderr, "[MCP] CreateProcessA failed for '%s': error %lu\n", mcp->command, err);
         CloseHandle(stdin_read); CloseHandle(stdin_write);
         CloseHandle(stdout_read); CloseHandle(stdout_write);
+        CloseHandle(stderr_read); CloseHandle(stderr_write);
         return false;
     }
-    
+
     mcp->stdin_fd = stdin_write;
     mcp->stdout_fd = stdout_read;
-    
+
     CloseHandle(stdin_read);
     CloseHandle(stdout_write);
+    CloseHandle(stderr_read);  // Discard stderr
+    CloseHandle(stderr_write);
     
     // Build initialize request (matching Go version)
     int req_id = next_id(mcp);
@@ -215,23 +271,29 @@ bool mcp_initialize(MCPClient *mcp) {
     
     char *resp = send_request(mcp, req);
     cJSON_Delete(req);
-    
-    if (!resp) return false;
-    
+
+    if (!resp) {
+        fprintf(stderr, "[MCP] initialize: no response from %s\n", mcp->name);
+        return false;
+    }
+
     cJSON *resp_obj = cJSON_Parse(resp);
     free(resp);
-    
+
     if (!resp_obj) return false;
-    
+
     // Check response ID
     if (!check_response_id(resp_obj, req_id)) {
         cJSON_Delete(resp_obj);
         return false;
     }
-    
+
     // Check for error
     cJSON *error = cJSON_GetObjectItem(resp_obj, "error");
     if (error) {
+        cJSON *err_msg = cJSON_GetObjectItem(error, "message");
+        fprintf(stderr, "[MCP] initialize error from %s: %s\n", mcp->name,
+                err_msg && err_msg->valuestring ? err_msg->valuestring : "unknown");
         cJSON_Delete(resp_obj);
         return false;
     }
@@ -244,38 +306,38 @@ bool mcp_initialize(MCPClient *mcp) {
 
 cJSON *mcp_list_tools(MCPClient *mcp) {
     if (!mcp || !mcp->initialized) return NULL;
-    
+
     int req_id = next_id(mcp);
-    
+
     cJSON *req = cJSON_CreateObject();
     cJSON_AddItemToObject(req, "jsonrpc", cJSON_CreateString("2.0"));
     cJSON_AddItemToObject(req, "id", cJSON_CreateNumber(req_id));
     cJSON_AddItemToObject(req, "method", cJSON_CreateString("tools/list"));
     cJSON_AddItemToObject(req, "params", cJSON_CreateObject());
-    
+
     char *resp = send_request(mcp, req);
     cJSON_Delete(req);
-    
+
     if (!resp) return NULL;
-    
+
     cJSON *resp_obj = cJSON_Parse(resp);
     free(resp);
-    
+
     if (!resp_obj) return NULL;
-    
+
     // Check response ID
     if (!check_response_id(resp_obj, req_id)) {
         cJSON_Delete(resp_obj);
         return NULL;
     }
-    
+
     // Check for error
     cJSON *error = cJSON_GetObjectItem(resp_obj, "error");
     if (error) {
         cJSON_Delete(resp_obj);
         return NULL;
     }
-    
+
     cJSON *result = cJSON_GetObjectItem(resp_obj, "result");
     if (result) {
         cJSON *tools_arr = cJSON_GetObjectItem(result, "tools");
@@ -285,7 +347,7 @@ cJSON *mcp_list_tools(MCPClient *mcp) {
             return copy;
         }
     }
-    
+
     cJSON_Delete(resp_obj);
     return NULL;
 }
