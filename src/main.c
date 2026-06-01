@@ -53,6 +53,7 @@ static void print_help(const char *prog) {
     printf("  --provider TYPE    Provider: anthropic (default) or openai\n");
     printf("  --api-key KEY     API key (or set ANTHROPIC_API_KEY env)\n");
     printf("  --base-url URL    Custom API base URL\n");
+    printf("  --max-tokens N    Max response tokens (default: 8192)\n");
     printf("\nEnvironment Variables:\n");
     printf("  ANTHROPIC_API_KEY   Anthropic API key\n");
     printf("  OPENAI_API_KEY      OpenAI API key\n");
@@ -78,6 +79,7 @@ int main(int argc, char *argv[]) {
     const char *provider_override = NULL;
     const char *api_key_override = NULL;
     const char *base_url_override = NULL;
+    int max_tokens_override = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -93,6 +95,8 @@ int main(int argc, char *argv[]) {
             if (i + 1 < argc) api_key_override = argv[++i];
         } else if (strcmp(argv[i], "--base-url") == 0) {
             if (i + 1 < argc) base_url_override = argv[++i];
+        } else if (strcmp(argv[i], "--max-tokens") == 0) {
+            if (i + 1 < argc) max_tokens_override = atoi(argv[++i]);
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             print_help(argv[0]);
@@ -134,10 +138,11 @@ int main(int argc, char *argv[]) {
 
     const char *model = model_override ? model_override : g_config.model;
     const char *base_url = base_url_override ? base_url_override : g_config.base_url;
+    int max_tokens = max_tokens_override > 0 ? max_tokens_override : g_config.max_tokens;
 
     http_init();
 
-    Provider *provider = provider_new(provider_type, api_key, model, base_url);
+    Provider *provider = provider_new(provider_type, api_key, model, base_url, max_tokens);
     if (!provider) {
         fprintf(stderr, "Error: Failed to create provider\n");
         http_cleanup();

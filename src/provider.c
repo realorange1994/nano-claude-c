@@ -14,7 +14,7 @@ struct Provider {
     int max_tokens;
 };
 
-Provider *provider_new(ProviderType type, const char *api_key, const char *model, const char *base_url) {
+Provider *provider_new(ProviderType type, const char *api_key, const char *model, const char *base_url, int max_tokens) {
     Provider *p = calloc(1, sizeof(Provider));
     if (!p) return NULL;
     p->type = type;
@@ -25,7 +25,7 @@ Provider *provider_new(ProviderType type, const char *api_key, const char *model
         free(p->api_key); free(p->model); free(p->base_url); free(p);
         return NULL;
     }
-    p->max_tokens = 4096;
+    p->max_tokens = max_tokens > 0 ? max_tokens : 8192;
     return p;
 }
 
@@ -35,6 +35,10 @@ void provider_free(Provider *p) {
     free(p->model);
     free(p->base_url);
     free(p);
+}
+
+void provider_set_max_tokens(Provider *p, int max_tokens) {
+    if (p && max_tokens > 0) p->max_tokens = max_tokens;
 }
 
 const char *provider_model(Provider *p) {

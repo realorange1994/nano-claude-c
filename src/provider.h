@@ -28,7 +28,7 @@ typedef struct {
 } StreamChunk;
 
 // Provider lifecycle
-Provider *provider_new(ProviderType type, const char *api_key, const char *model, const char *base_url);
+Provider *provider_new(ProviderType type, const char *api_key, const char *model, const char *base_url, int max_tokens);
 void provider_free(Provider *p);
 
 typedef struct ToolRegistry ToolRegistry;
@@ -41,7 +41,7 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
 // Synchronous chat (for compact summary)
 char *provider_chat_sync(Provider *p, cJSON *messages);
 
-// Get provider info
+void provider_set_max_tokens(Provider *p, int max_tokens);
 const char *provider_model(Provider *p);
 ProviderType provider_type(Provider *p);
 

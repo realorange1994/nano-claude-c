@@ -118,6 +118,12 @@ bool config_load(const char *path) {
         g_config.keep_recent_tokens = 20000;
     }
     
+    if ((item = cJSON_GetObjectItem(root, "max_tokens"))) {
+        g_config.max_tokens = item->valueint;
+    } else {
+        g_config.max_tokens = 8192;
+    }
+
     // Parse MCP servers
     g_config.mcp_count = 0;
     cJSON *mcp_servers = cJSON_GetObjectItem(root, "mcp_servers");

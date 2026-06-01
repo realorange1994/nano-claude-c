@@ -19,6 +19,7 @@ typedef struct {
     int context_window;
     int reserve_tokens;
     int keep_recent_tokens;
+    int max_tokens;
     MCPServer mcp_servers[MAX_MCP_SERVERS];
     int mcp_count;
 } Config;
