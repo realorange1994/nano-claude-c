@@ -316,9 +316,6 @@ static char **split_text_lines_safe(const char *text, int *count) {
     return split_text_lines(text, count);
 }
 
-// Max lines per read
-#define MAX_READ_LINES 500
-
 char *tool_read_file(cJSON *input, char **error) {
     cJSON *path = cJSON_GetObjectItem(input, "path");
     if (!path || !path->valuestring) {
