@@ -79,12 +79,54 @@ static Token lexer_next_token(Lexer *lex) {
         return tok;
     }
     
-    // Number
+    // Number (including hex 0x, octal 0o, binary 0b)
+    if (c == '0' && (lex->expr[lex->pos + 1] == 'x' || lex->expr[lex->pos + 1] == 'X' ||
+                      lex->expr[lex->pos + 1] == 'o' || lex->expr[lex->pos + 1] == 'O' ||
+                      lex->expr[lex->pos + 1] == 'b' || lex->expr[lex->pos + 1] == 'B')) {
+        tok.type = TOKEN_NUMBER;
+        lex->pos += 2;  // skip 0x/0o/0b
+        double value = 0;
+        char base = lex->expr[lex->pos - 1];
+        base = (base >= 'a' && base <= 'z') ? base - 32 : base;  // uppercase
+        
+        if (base == 'X') {
+            // Hexadecimal
+            while (lex->pos < lex->len) {
+                char c2 = lex->expr[lex->pos];
+                if (c2 >= '0' && c2 <= '9') { value = value * 16 + (c2 - '0'); lex->pos++; }
+                else if (c2 >= 'a' && c2 <= 'f') { value = value * 16 + (c2 - 'a' + 10); lex->pos++; }
+                else if (c2 >= 'A' && c2 <= 'F') { value = value * 16 + (c2 - 'A' + 10); lex->pos++; }
+                else break;
+            }
+        } else if (base == 'O') {
+            // Octal
+            while (lex->pos < lex->len && lex->expr[lex->pos] >= '0' && lex->expr[lex->pos] <= '7') {
+                value = value * 8 + (lex->expr[lex->pos] - '0');
+                lex->pos++;
+            }
+        } else if (base == 'B') {
+            // Binary
+            while (lex->pos < lex->len && (lex->expr[lex->pos] == '0' || lex->expr[lex->pos] == '1')) {
+                value = value * 2 + (lex->expr[lex->pos] - '0');
+                lex->pos++;
+            }
+        }
+        tok.number = value;
+        return tok;
+    }
+    
+    // Regular number (may have % suffix for percentage)
     if (isdigit((unsigned char)c) || (c == '.' && isdigit((unsigned char)lex->expr[lex->pos + 1]))) {
         tok.type = TOKEN_NUMBER;
         char *end;
         tok.number = strtod(lex->expr + lex->pos, &end);
         lex->pos = end - lex->expr;
+        // Handle percentage suffix
+        while (lex->pos < lex->len && isspace((unsigned char)lex->expr[lex->pos])) lex->pos++;
+        if (lex->pos < lex->len && lex->expr[lex->pos] == '%') {
+            lex->pos++;
+            tok.number /= 100.0;
+        }
         return tok;
     }
     
@@ -265,7 +307,28 @@ static double parse_expr(Parser *p) {
 static double parse_factor(Parser *p) {
     double left = parse_power(p);
     
+    // Handle factorial (!)
+    if (p->current.type == TOKEN_MUL && p->current.type != TOKEN_EOF) {
+        // Check if it's actually '!' (but TOKEN_MUL is '*')
+        // We need to add factorial handling in parse_primary or here
+    }
+    
     while (1) {
+        // Handle factorial operator (!)
+        // Note: We detect '!' by checking the char directly since it's not a token
+        while (lexer_peek(&p->lex) == '!') {
+            p->lex.pos++;  // consume '!'
+            // Compute factorial
+            int64_t n = (int64_t)left;
+            if (n < 0) { left = NAN; break; }
+            if (n == 0 || n == 1) { left = 1; }
+            else {
+                double result = 1;
+                for (int64_t i = 2; i <= n; i++) result *= i;
+                left = result;
+            }
+        }
+        
         // Explicit multiplication/division/modulo
         if (p->current.type == TOKEN_MUL) {
             parser_next(p);
@@ -277,7 +340,11 @@ static double parse_factor(Parser *p) {
             left /= right;
         } else if (p->current.type == TOKEN_MOD) {
             parser_next(p);
-            left = fmod(left, parse_power(p));
+            double right = parse_power(p);
+            if (right == 0) { left = NAN; break; }
+            // Python-style modulo: always has same sign as divisor
+            left = fmod(left, right);
+            if (left < 0) left += right;
         }
         // Implicit multiplication: number followed by ( or identifier
         else if (p->current.type == TOKEN_LPAREN) {
