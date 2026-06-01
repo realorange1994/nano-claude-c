@@ -186,21 +186,21 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON *read_schema = cJSON_CreateObject();
     cJSON_AddItemToObject(read_schema, "type", cJSON_CreateString("object"));
     cJSON *read_props = cJSON_CreateObject();
-    cJSON *path_prop = cJSON_CreateObject(); cJSON_AddItemToObject(path_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(path_prop, "description", cJSON_CreateString("File path to read")); cJSON_AddItemToObject(read_props, "path", path_prop);
+    cJSON *path_prop = cJSON_CreateObject(); cJSON_AddItemToObject(path_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(path_prop, "description", cJSON_CreateString("File path to read")); cJSON_AddItemToObject(read_props, "file_path", path_prop);
     cJSON *offset_prop = cJSON_CreateObject(); cJSON_AddItemToObject(offset_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(offset_prop, "description", cJSON_CreateString("Line number to start reading from (1-indexed, default: 1)")); cJSON_AddItemToObject(read_props, "offset", offset_prop);
     cJSON *limit_prop = cJSON_CreateObject(); cJSON_AddItemToObject(limit_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(limit_prop, "description", cJSON_CreateString("Maximum number of lines to read (default: 500). Always use at least 250 to minimize tool calls.")); cJSON_AddItemToObject(read_props, "limit", limit_prop);
     cJSON_AddItemToObject(read_schema, "properties", read_props);
-    cJSON *read_required = cJSON_CreateArray(); cJSON_AddItemToArray(read_required, cJSON_CreateString("path")); cJSON_AddItemToObject(read_schema, "required", read_required);
+    cJSON *read_required = cJSON_CreateArray(); cJSON_AddItemToArray(read_required, cJSON_CreateString("file_path")); cJSON_AddItemToObject(read_schema, "required", read_required);
     tool_register(reg, "Read", "Read file contents", read_schema, tool_read_file);
 
     // Write tool
     cJSON *write_schema = cJSON_CreateObject();
     cJSON_AddItemToObject(write_schema, "type", cJSON_CreateString("object"));
     cJSON *write_props = cJSON_CreateObject();
-    cJSON *wpath_prop = cJSON_CreateObject(); cJSON_AddItemToObject(wpath_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(wpath_prop, "description", cJSON_CreateString("File path to write")); cJSON_AddItemToObject(write_props, "path", wpath_prop);
+    cJSON *wpath_prop = cJSON_CreateObject(); cJSON_AddItemToObject(wpath_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(wpath_prop, "description", cJSON_CreateString("File path to write")); cJSON_AddItemToObject(write_props, "file_path", wpath_prop);
     cJSON *wcontent_prop = cJSON_CreateObject(); cJSON_AddItemToObject(wcontent_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(wcontent_prop, "description", cJSON_CreateString("Content to write")); cJSON_AddItemToObject(write_props, "content", wcontent_prop);
     cJSON_AddItemToObject(write_schema, "properties", write_props);
-    cJSON *write_required = cJSON_CreateArray(); cJSON_AddItemToArray(write_required, cJSON_CreateString("path")); cJSON_AddItemToArray(write_required, cJSON_CreateString("content")); cJSON_AddItemToObject(write_schema, "required", write_required);
+    cJSON *write_required = cJSON_CreateArray(); cJSON_AddItemToArray(write_required, cJSON_CreateString("file_path")); cJSON_AddItemToArray(write_required, cJSON_CreateString("content")); cJSON_AddItemToObject(write_schema, "required", write_required);
     tool_register(reg, "Write", "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.", write_schema, tool_write_file);
 
     // Edit tool
@@ -210,6 +210,7 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON *epath_prop = cJSON_CreateObject(); cJSON_AddItemToObject(epath_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(epath_prop, "description", cJSON_CreateString("File path to edit")); cJSON_AddItemToObject(edit_props, "path", epath_prop);
     cJSON *old_prop = cJSON_CreateObject(); cJSON_AddItemToObject(old_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(old_prop, "description", cJSON_CreateString("Text to replace")); cJSON_AddItemToObject(edit_props, "old_string", old_prop);
     cJSON *new_prop = cJSON_CreateObject(); cJSON_AddItemToObject(new_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(new_prop, "description", cJSON_CreateString("Replacement text")); cJSON_AddItemToObject(edit_props, "new_string", new_prop);
+    cJSON *ra_prop = cJSON_CreateObject(); cJSON_AddItemToObject(ra_prop, "type", cJSON_CreateString("boolean")); cJSON_AddItemToObject(ra_prop, "description", cJSON_CreateString("Replace all occurrences")); cJSON_AddItemToObject(edit_props, "replace_all", ra_prop);
     cJSON_AddItemToObject(edit_schema, "properties", edit_props);
     cJSON *edit_required = cJSON_CreateArray(); cJSON_AddItemToArray(edit_required, cJSON_CreateString("path")); cJSON_AddItemToArray(edit_required, cJSON_CreateString("old_string")); cJSON_AddItemToArray(edit_required, cJSON_CreateString("new_string")); cJSON_AddItemToObject(edit_schema, "required", edit_required);
     tool_register(reg, "Edit", "Edit file content", edit_schema, tool_edit_file);
@@ -236,6 +237,7 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON *gprops = cJSON_CreateObject();
     cJSON *gpat_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gpat_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gpat_prop, "description", cJSON_CreateString("Glob pattern")); cJSON_AddItemToObject(gprops, "pattern", gpat_prop);
     cJSON *gglob_path_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gglob_path_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gglob_path_prop, "description", cJSON_CreateString("Directory to search")); cJSON_AddItemToObject(gprops, "path", gglob_path_prop);
+    cJSON *gmax_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gmax_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(gmax_prop, "description", cJSON_CreateString("Max results")); cJSON_AddItemToObject(gprops, "maxResults", gmax_prop);
     cJSON *gtype_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gtype_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gtype_prop, "description", cJSON_CreateString("Type filter: file, dir, all")); cJSON_AddItemToObject(gprops, "type", gtype_prop);
     cJSON_AddItemToObject(gschema, "properties", gprops);
     cJSON *glob_required = cJSON_CreateArray(); cJSON_AddItemToArray(glob_required, cJSON_CreateString("pattern")); cJSON_AddItemToObject(gschema, "required", glob_required);

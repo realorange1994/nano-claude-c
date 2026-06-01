@@ -16,6 +16,10 @@
 #include <windows.h>
 #include <direct.h>
 #include <io.h>
+#include <sys/stat.h>
+#ifndef S_ISDIR
+#define S_ISDIR(mode) ((mode) & _S_IFDIR)
+#endif
 #define mkdir(path, mode) _mkdir(path)
 #else
 #include <sys/stat.h>
@@ -185,42 +189,241 @@ static char *clean_utf8(const char *input) {
     return output;
 }
 
+// ============== Path expansion ==============
+static char *expand_path(const char *path) {
+    if (!path) return NULL;
+    // Expand ~ to home directory
+    if (path[0] == '~') {
+#ifdef _WIN32
+        const char *home = getenv("USERPROFILE");
+        if (!home) home = getenv("HOME");
+#else
+        const char *home = getenv("HOME");
+#endif
+        if (home) {
+            size_t hlen = strlen(home);
+            size_t plen = strlen(path);
+            char *expanded = malloc(hlen + plen);
+            if (!expanded) return strdup(path);
+            memcpy(expanded, home, hlen);
+            memcpy(expanded + hlen, path + 1, plen); // skip ~, include \0
+            return expanded;
+        }
+    }
+    return strdup(path);
+}
+
+// ============== Binary extension check ==============
+static int is_binary_extension(const char *ext) {
+    if (!ext) return 0;
+    // Lowercase compare
+    char lower[16];
+    size_t len = strlen(ext);
+    if (len >= sizeof(lower)) return 0;
+    for (size_t i = 0; i <= len; i++) lower[i] = tolower((unsigned char)ext[i]);
+
+    static const char *binary_exts[] = {
+        ".exe", ".dll", ".so", ".dylib", ".com",
+        ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tgz", ".zst",
+        ".cab", ".iso", ".img", ".dmg",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".ico", ".webp",
+        ".mp3", ".mp4", ".wav", ".ogg", ".avi", ".mov", ".mkv", ".flac",
+        ".pyc", ".pyo", ".o", ".obj", ".a", ".lib", ".class", ".jar",
+        ".dat", ".bin", ".db", ".sqlite", ".pdf", ".docx", ".xlsx", ".pptx",
+        ".woff", ".woff2", ".eot", ".ttf",
+        NULL
+    };
+    for (int i = 0; binary_exts[i]; i++) {
+        if (strcmp(lower, binary_exts[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+// ============== Binary magic bytes check ==============
+static int is_binary_magic(const unsigned char *header, int len) {
+    if (len < 2) return 0;
+    // PE/EXE: MZ
+    if (header[0] == 'M' && header[1] == 'Z') return 1;
+    // GZIP: 1f 8b
+    if (header[0] == 0x1f && header[1] == 0x8b) return 1;
+    // BZIP2: BZ
+    if (header[0] == 'B' && header[1] == 'Z') return 1;
+    // JPEG: ff d8 ff
+    if (len >= 3 && header[0] == 0xff && header[1] == 0xd8 && header[2] == 0xff) return 1;
+    if (len < 4) return 0;
+    // ELF: 7f 45 4c 46
+    if (header[0] == 0x7f && header[1] == 'E' && header[2] == 'L' && header[3] == 'F') return 1;
+    // PDF: %PDF
+    if (header[0] == '%' && header[1] == 'P' && header[2] == 'D' && header[3] == 'F') return 1;
+    // PNG: 89 50 4e 47
+    if (len >= 4 && header[0] == 0x89 && header[1] == 'P' && header[2] == 'N' && header[3] == 'G') return 1;
+    // ZIP/JAR/DOCX: 50 4b 03 04
+    if (header[0] == 'P' && header[1] == 'K' && header[2] == 0x03 && header[3] == 0x04) return 1;
+    // Java .class: ca fe ba be
+    if (header[0] == 0xca && header[1] == 0xfe && header[2] == 0xba && header[3] == 0xbe) return 1;
+    return 0;
+}
+
+// ============== Device file check ==============
+static int is_device_file(const char *path) {
+    if (!path) return 0;
+    static const char *dev_paths[] = {
+        "/dev/zero", "/dev/random", "/dev/urandom", "/dev/full",
+        "/dev/stdin", "/dev/tty", "/dev/console",
+        "/dev/stdout", "/dev/stderr",
+        NULL
+    };
+    for (int i = 0; dev_paths[i]; i++) {
+        if (strstr(path, dev_paths[i])) return 1;
+    }
+    if (strstr(path, "/proc/") && strstr(path, "/fd/")) return 1;
+    return 0;
+}
+
+// ============== UNC path check ==============
+static int is_unc_path(const char *path) {
+    if (!path) return 0;
+    if (path[0] == '\\' && path[1] == '\\') return 1;
+#ifdef _WIN32
+    if (path[0] == '/' && path[1] == '/') return 1;
+#endif
+    return 0;
+}
+
+// ============== Atomic file write ==============
+static int write_file_atomically(const char *path, const char *content, size_t content_len) {
+    // Generate temp file name: path + .tmp.<timestamp>
+    size_t path_len = strlen(path);
+    char *tmp_path = malloc(path_len + 32);
+    if (!tmp_path) return -1;
+
+#ifdef _WIN32
+    snprintf(tmp_path, path_len + 32, "%s.tmp.%lld", path, (long long)GetTickCount64());
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    snprintf(tmp_path, path_len + 32, "%s.tmp.%lld%09ld", path, (long long)ts.tv_sec, ts.tv_nsec);
+#endif
+
+    // Write to temp file
+    FILE *f = utf8_fopen(tmp_path, "wb");
+    if (!f) { free(tmp_path); return -1; }
+    size_t written = fwrite(content, 1, content_len, f);
+    fclose(f);
+    if (written != content_len) { remove(tmp_path); free(tmp_path); return -1; }
+
+    // Rename temp to target (atomic on POSIX, best-effort on Windows)
+#ifdef _WIN32
+    // On Windows, MoveFileEx replaces the target atomically
+    wchar_t *w_tmp = utf8_to_wide(tmp_path);
+    wchar_t *w_dst = utf8_to_wide(path);
+    int ok = 0;
+    if (w_tmp && w_dst) {
+        ok = MoveFileExW(w_tmp, w_dst, MOVEFILE_REPLACE_EXISTING) != 0;
+    }
+    free(w_tmp); free(w_dst);
+    if (!ok) {
+        // Fallback: direct write
+        f = utf8_fopen(path, "wb");
+        if (f) { fwrite(content, 1, content_len, f); fclose(f); ok = 1; }
+        remove(tmp_path);
+    }
+#else
+    if (rename(tmp_path, path) != 0) {
+        // Fallback: direct write
+        f = fopen(path, "wb");
+        if (f) { fwrite(content, 1, content_len, f); fclose(f); }
+        remove(tmp_path);
+    }
+#endif
+    free(tmp_path);
+    return 0;
+}
+
 // ============== Read tool ==============
-#define MAX_READ_OUTPUT 51200
-#define MAX_READ_LINES 1000
+#define MAX_FILE_SIZE (256 * 1024)       // 256KB
+#define MAX_READ_OUTPUT (256 * 1024)     // 256KB output limit
+#define DEFAULT_READ_LINES 2000          // default line limit (matching upstream)
 
 char *tool_read_file(cJSON *input, char **error) {
-    cJSON *path = cJSON_GetObjectItem(input, "path");
-    if (!path || !path->valuestring) { *error = strdup("missing path"); return NULL; }
+    cJSON *path_item = cJSON_GetObjectItem(input, "file_path");
+    if (!path_item || !path_item->valuestring) { *error = strdup("missing file_path"); return NULL; }
 
-    cJSON *offset = cJSON_GetObjectItem(input, "offset");
-    cJSON *limit = cJSON_GetObjectItem(input, "limit");
+    char *fp = expand_path(path_item->valuestring);
+    if (!fp) { *error = strdup("out of memory"); return NULL; }
+
+    // Security: block UNC paths
+    if (is_unc_path(fp)) {
+        char *msg = malloc(strlen(fp) + 64);
+        snprintf(msg, strlen(fp) + 64, "UNC path access deferred: %s", fp);
+        free(fp); *error = msg; return NULL;
+    }
+
+    // Security: block device files
+    if (is_device_file(fp)) {
+        char *msg = malloc(strlen(fp) + 64);
+        snprintf(msg, strlen(fp) + 64, "cannot read device file: %s", fp);
+        free(fp); *error = msg; return NULL;
+    }
+
+    // Check file exists and get size
+#ifdef _WIN32
+    struct _stat st;
+    if (_stat(fp, &st) != 0) { free(fp); *error = strdup("file not found"); return NULL; }
+#else
+    struct stat st;
+    if (stat(fp, &st) != 0) { free(fp); *error = strdup("file not found"); return NULL; }
+#endif
+    if (S_ISDIR(st.st_mode)) { free(fp); *error = strdup("not a file (is a directory)"); return NULL; }
+
+    // Binary extension check
+    const char *dot = strrchr(fp, '.');
+    if (dot && is_binary_extension(dot)) {
+        char *msg = malloc(strlen(dot) + 64);
+        snprintf(msg, strlen(dot) + 64, "binary file not supported: %s", dot);
+        free(fp); *error = msg; return NULL;
+    }
+
+    // Parse offset/limit
+    cJSON *offset_item = cJSON_GetObjectItem(input, "offset");
+    cJSON *limit_item = cJSON_GetObjectItem(input, "limit");
+
+    int has_explicit_offset = (offset_item && offset_item->type == cJSON_Number);
+    int has_explicit_limit = (limit_item && limit_item->type == cJSON_Number);
+    int is_partial_request = has_explicit_offset && has_explicit_limit;
 
     int line_offset = 0;
-    int line_limit = MAX_READ_LINES;
-    if (offset && offset->type == cJSON_Number) {
-        int val = (int)offset->valuedouble;
-        if (val < 1) { *error = strdup("offset must be >= 1"); return NULL; }
+    int line_limit = DEFAULT_READ_LINES;
+    if (has_explicit_offset) {
+        int val = (int)offset_item->valuedouble;
+        if (val < 1) val = 1;
         line_offset = val - 1;
     }
-    if (limit && limit->type == cJSON_Number) {
-        int val = (int)limit->valuedouble;
-        if (val > 0 && val < MAX_READ_LINES) line_limit = val;
+    if (has_explicit_limit) {
+        int val = (int)limit_item->valuedouble;
+        if (val > 0) line_limit = val;
     }
 
-    FILE *f = utf8_fopen(path->valuestring, "rb");
-    if (!f) { *error = strdup("failed to open file"); return NULL; }
+    // Only enforce file size limit for full-file reads
+    if (!is_partial_request && st.st_size > MAX_FILE_SIZE) {
+        free(fp); *error = strdup("file too large (>256 KB). Use offset and limit parameters to read specific portions."); return NULL;
+    }
 
-    // Read entire file content in binary mode
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    // Read file
+    FILE *f = utf8_fopen(fp, "rb");
+    if (!f) { free(fp); *error = strdup("failed to open file"); return NULL; }
 
+    long fsize = st.st_size;
     char *raw_content = malloc(fsize + 1);
-    if (!raw_content) { fclose(f); *error = strdup("out of memory"); return NULL; }
+    if (!raw_content) { fclose(f); free(fp); *error = strdup("out of memory"); return NULL; }
     size_t read_bytes = fread(raw_content, 1, fsize, f);
     raw_content[read_bytes] = '\0';
     fclose(f);
+
+    // Magic bytes detection
+    if (read_bytes >= 4 && is_binary_magic((const unsigned char *)raw_content, (int)read_bytes < 512 ? (int)read_bytes : 512)) {
+        free(raw_content); free(fp); *error = strdup("binary file detected (magic bytes mismatch)"); return NULL;
+    }
 
     // Strip BOM if present
     char *content_start = raw_content;
@@ -229,36 +432,37 @@ char *tool_read_file(cJSON *input, char **error) {
         content_start = raw_content + 3;
     }
 
-    // Process line by line from the UTF-8 content
+    // Split into lines and output with cat -n format (lineNum\tcontent)
     Buffer lines_buf;
     buffer_init(&lines_buf);
-    char line[4096];
     int total_file_lines = 0;
     int lines_read = 0;
 
-    // Split content into lines
     char *ptr = content_start;
     while (*ptr) {
         char *line_end = strchr(ptr, '\n');
         if (line_end) {
             *line_end = '\0';
-            // Also strip \r
             size_t line_len = strlen(ptr);
             if (line_len > 0 && ptr[line_len - 1] == '\r') ptr[--line_len] = '\0';
 
             total_file_lines++;
             if (total_file_lines > line_offset && lines_read < line_limit) {
+                char prefix[32];
+                snprintf(prefix, sizeof(prefix), "%d\t", total_file_lines);
+                buffer_append_str(&lines_buf, prefix);
                 buffer_append_str(&lines_buf, ptr);
                 buffer_append_str(&lines_buf, "\n");
                 lines_read++;
             }
-
             ptr = line_end + 1;
         } else {
-            // Last line (no trailing newline)
             if (*ptr) {
                 total_file_lines++;
                 if (total_file_lines > line_offset && lines_read < line_limit) {
+                    char prefix[32];
+                    snprintf(prefix, sizeof(prefix), "%d\t", total_file_lines);
+                    buffer_append_str(&lines_buf, prefix);
                     buffer_append_str(&lines_buf, ptr);
                     buffer_append_str(&lines_buf, "\n");
                     lines_read++;
@@ -269,42 +473,95 @@ char *tool_read_file(cJSON *input, char **error) {
     }
     free(raw_content);
 
-    char *result = lines_buf.data ? lines_buf.data : strdup("");
-    lines_buf.data = NULL; lines_buf.len = 0; lines_buf.capacity = 0;
-    buffer_free(&lines_buf);
+    // Empty file
+    if (total_file_lines == 0) {
+        free(fp);
+        return strdup("<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>");
+    }
 
+    // Offset beyond file
+    if (line_offset >= total_file_lines) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "<system-reminder>Warning: the file exists but is shorter than the provided offset (%d). The file has %d lines.</system-reminder>", line_offset + 1, total_file_lines);
+        free(fp);
+        return strdup(msg);
+    }
+
+    char *result = lines_buf.data ? lines_buf.data : strdup("");
+    lines_buf.data = NULL; buffer_free(&lines_buf);
+
+    // Truncate output if exceeds byte limit
+    size_t result_len = strlen(result);
+    if (result_len > MAX_READ_OUTPUT) {
+        result[MAX_READ_OUTPUT] = '\0';
+        // Append truncation notice
+        char *truncated = malloc(MAX_READ_OUTPUT + 128);
+        if (truncated) {
+            memcpy(truncated, result, MAX_READ_OUTPUT);
+            strcpy(truncated + MAX_READ_OUTPUT, "\n... (output truncated due to size limit)");
+            free(result);
+            result = truncated;
+        }
+    }
+
+    // Add pagination hint
     Buffer out_buf;
     buffer_init(&out_buf);
     buffer_append_str(&out_buf, result);
     free(result);
 
-    int more_lines = total_file_lines - (line_offset + lines_read);
-    if (more_lines > 0) {
+    int end_line = line_offset + lines_read;
+    if (end_line < total_file_lines) {
         char suffix[256];
-        snprintf(suffix, sizeof(suffix), "\n\n[%d more lines. Use offset=%d]", more_lines, line_offset + lines_read + 1);
+        snprintf(suffix, sizeof(suffix), "\n\n(Showing lines %d-%d of %d. Use offset=%d to continue.)", line_offset + 1, end_line, total_file_lines, end_line + 1);
+        buffer_append_str(&out_buf, suffix);
+    } else {
+        char suffix[64];
+        snprintf(suffix, sizeof(suffix), "\n\n(End of file - %d lines total)", total_file_lines);
         buffer_append_str(&out_buf, suffix);
     }
 
     char *output = out_buf.data ? out_buf.data : strdup("");
-    out_buf.data = NULL; out_buf.len = 0; out_buf.capacity = 0;
-    buffer_free(&out_buf);
+    out_buf.data = NULL; buffer_free(&out_buf);
 
     char *dirty = output;
     output = clean_utf8(dirty);
     free(dirty);
+    free(fp);
     return output;
 }
 
 // ============== Write tool ==============
+#define MAX_WRITE_SIZE (10 * 1024 * 1024)  // 10MB
+
 char *tool_write_file(cJSON *input, char **error) {
-    cJSON *path = cJSON_GetObjectItem(input, "path");
+    cJSON *path_item = cJSON_GetObjectItem(input, "file_path");
     cJSON *content = cJSON_GetObjectItem(input, "content");
-    if (!path || !path->valuestring) { *error = strdup("missing path"); return NULL; }
+    if (!path_item || !path_item->valuestring) { *error = strdup("missing file_path"); return NULL; }
     if (!content || !content->valuestring) { *error = strdup("missing content"); return NULL; }
+
+    size_t content_len = strlen(content->valuestring);
+
+    // Content size limit
+    if (content_len > MAX_WRITE_SIZE) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "content too large (%zu bytes, max %d bytes)", content_len, MAX_WRITE_SIZE);
+        *error = strdup(msg); return NULL;
+    }
+
+    char *fp = expand_path(path_item->valuestring);
+    if (!fp) { *error = strdup("out of memory"); return NULL; }
+
+    // Security: block UNC paths
+    if (is_unc_path(fp)) {
+        char *msg = malloc(strlen(fp) + 64);
+        snprintf(msg, strlen(fp) + 64, "UNC path access deferred: %s", fp);
+        free(fp); *error = msg; return NULL;
+    }
 
     // Create parent directories
     char dir_buf[4096];
-    strncpy(dir_buf, path, sizeof(dir_buf) - 1);
+    strncpy(dir_buf, fp, sizeof(dir_buf) - 1);
     dir_buf[sizeof(dir_buf) - 1] = '\0';
     char *last_sep = strrchr(dir_buf, '/');
     if (!last_sep) last_sep = strrchr(dir_buf, '\\');
@@ -313,16 +570,28 @@ char *tool_write_file(cJSON *input, char **error) {
         mkdirs(dir_buf);
     }
 
-    FILE *f = utf8_fopen(path, "wb");
-    if (!f) { *error = strdup("failed to open file for writing"); return NULL; }
+    // Atomic write
+    if (write_file_atomically(fp, content->valuestring, content_len) != 0) {
+        free(fp); *error = strdup("failed to write file"); return NULL;
+    }
 
-    fwrite(content->valuestring, 1, strlen(content->valuestring), f);
-    fclose(f);
-
-    size_t content_len = strlen(content->valuestring);
-    char *result = malloc(64 + strlen(path->valuestring) + 20);
-    if (result) sprintf(result, "Successfully wrote %zu bytes to %s", content_len, path->valuestring);
+    // Build result message
+    char *result = malloc(64 + strlen(fp) + 20);
+    if (result) sprintf(result, "Wrote %zu chars to %s", content_len, fp);
     else result = strdup("File written successfully");
+
+    // Large file warning (>1MB)
+    if (content_len > 1024 * 1024) {
+        char *warn = malloc(strlen(result) + 128);
+        if (warn) {
+            double size_mb = (double)content_len / (1024.0 * 1024.0);
+            snprintf(warn, strlen(result) + 128, "%s\n[WARN] Large file written (%.1f MB). Confirm with the user before proceeding.", result, size_mb);
+            free(result);
+            result = warn;
+        }
+    }
+
+    free(fp);
     return result;
 }
 
@@ -382,35 +651,75 @@ char *tool_edit_file(cJSON *input, char **error) {
     cJSON *path = cJSON_GetObjectItem(input, "path");
     cJSON *old_str = cJSON_GetObjectItem(input, "old_string");
     cJSON *new_str = cJSON_GetObjectItem(input, "new_string");
+    cJSON *replace_all_item = cJSON_GetObjectItem(input, "replace_all");
     if (!path || !path->valuestring) { *error = strdup("missing path"); return NULL; }
     if (!old_str || !old_str->valuestring) { *error = strdup("missing old_string"); return NULL; }
     if (!new_str || !new_str->valuestring) { *error = strdup("missing new_string"); return NULL; }
 
-    FILE *f = utf8_fopen(path->valuestring, "rb");
-    if (!f) { *error = strdup("failed to open file"); return NULL; }
+    int replace_all = replace_all_item && replace_all_item->valueint != 0;
 
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    // Expand ~ in path
+    char *fp = expand_path(path->valuestring);
+    if (!fp) { *error = strdup("out of memory"); return NULL; }
+
+    // Block .ipynb files (complex JSON structure, easy to corrupt)
+    const char *ext = strrchr(fp, '.');
+    if (ext && strcmp(ext, ".ipynb") == 0) {
+        free(fp); *error = strdup("editing .ipynb files is not supported. Use write_file to overwrite the entire notebook, or read_file to view the JSON structure and make targeted edits."); return NULL;
+    }
+
+    // Security: block UNC paths
+    if (is_unc_path(fp)) {
+        char *msg = malloc(strlen(fp) + 64);
+        snprintf(msg, strlen(fp) + 64, "UNC path access deferred: %s", fp);
+        free(fp); *error = msg; return NULL;
+    }
+
+    // Check file exists and get size
+#ifdef _WIN32
+    struct _stat st;
+    if (_stat(fp, &st) != 0) { free(fp); *error = strdup("file not found"); return NULL; }
+#else
+    struct stat st;
+    if (stat(fp, &st) != 0) { free(fp); *error = strdup("file not found"); return NULL; }
+#endif
+    if (S_ISDIR(st.st_mode)) { free(fp); *error = strdup("not a file (is a directory)"); return NULL; }
+
+    // File size limit (1GB)
+    if (st.st_size > 1024LL * 1024 * 1024) {
+        free(fp); *error = strdup("file too large (>1GB) to edit"); return NULL;
+    }
+
+    // Read file
+    FILE *f = utf8_fopen(fp, "rb");
+    if (!f) { free(fp); *error = strdup("failed to open file"); return NULL; }
+
+    long size = st.st_size;
     char *content = malloc(size + 1);
-    if (!content) { fclose(f); *error = strdup("out of memory"); return NULL; }
-    fread(content, 1, size, f);
-    content[size] = '\0';
+    if (!content) { fclose(f); free(fp); *error = strdup("out of memory"); return NULL; }
+    size_t read_bytes = fread(content, 1, size, f);
+    content[read_bytes] = '\0';
     fclose(f);
+
+    // Binary magic bytes detection
+    if (read_bytes >= 4 && is_binary_magic((const unsigned char *)content, (int)(read_bytes < 512 ? read_bytes : 512))) {
+        free(content); free(fp); *error = strdup("binary file detected"); return NULL;
+    }
 
     // Strip BOM
     char *file_content = content;
     int bom_len = 0;
-    if (size >= 3 && (unsigned char)content[0] == 0xEF && (unsigned char)content[1] == 0xBB && (unsigned char)content[2] == 0xBF) {
+    if (read_bytes >= 3 && (unsigned char)content[0] == 0xEF && (unsigned char)content[1] == 0xBB && (unsigned char)content[2] == 0xBF) {
         bom_len = 3; file_content = content + 3;
     }
 
-    // Detect line ending
+    // Detect line ending style
     int has_crlf = 0;
-    for (int i = 0; i < size - bom_len; i++) {
-        if (content[i] == '\r' && i + 1 < size && content[i + 1] == '\n') { has_crlf = 1; break; }
+    for (int i = 0; i < (int)(read_bytes - bom_len); i++) {
+        if (file_content[i] == '\r' && i + 1 < (int)(read_bytes - bom_len) && file_content[i + 1] == '\n') { has_crlf = 1; break; }
     }
 
+    // Normalize line endings to LF for processing
     char *normalized = normalize_line_endings(file_content);
     char *normalized_old = normalize_line_endings(old_str->valuestring);
     char *normalized_new = normalize_line_endings(new_str->valuestring);
@@ -419,62 +728,148 @@ char *tool_edit_file(cJSON *input, char **error) {
         *error = strdup("out of memory"); return NULL;
     }
 
-    char *pos = strstr(normalized, normalized_old);
-    int match_len = 0;
-    if (!pos) {
-        int fuzzy_idx = fuzzy_find_text(normalized, normalized_old);
-        if (fuzzy_idx >= 0) pos = normalized + fuzzy_idx;
-    }
-    if (pos) match_len = strlen(normalized_old);
-    if (!pos) {
-        free(content); free(normalized); free(normalized_old); free(normalized_new);
-        *error = strdup("old_string not found in file"); return NULL;
+    // Strip trailing whitespace from old/new strings (except .md files)
+    // This helps LLM-generated edits that may have trailing spaces
+    if (ext && strcmp(ext, ".md") != 0) {
+        {
+            size_t len = strlen(normalized_old);
+            while (len > 0 && (normalized_old[len-1] == ' ' || normalized_old[len-1] == '\t')) {
+                normalized_old[--len] = '\0';
+            }
+        }
+        {
+            size_t len = strlen(normalized_new);
+            while (len > 0 && (normalized_new[len-1] == ' ' || normalized_new[len-1] == '\t')) {
+                normalized_new[--len] = '\0';
+            }
+        }
     }
 
-    // Check uniqueness
-    int occurrences = 0;
-    char *check_pos = normalized;
-    while ((check_pos = strstr(check_pos, normalized_old)) != NULL) { occurrences++; check_pos++; }
-    if (occurrences > 1) {
+    // Identical old/new check
+    if (strlen(normalized_old) == 0 || strcmp(normalized_old, normalized_new) == 0) {
         free(content); free(normalized); free(normalized_old); free(normalized_new);
-        char err_buf[256];
-        snprintf(err_buf, sizeof(err_buf), "Found %d occurrences. Text must be unique.", occurrences);
+        *error = strdup("old_string and new_string are identical, no changes needed"); return NULL;
+    }
+
+    // Curly quote normalization for matching: convert smart quotes to straight
+    // " (U+201C) = \xe2\x80\x9c, " (U+201D) = \xe2\x80\x9d
+    // ' (U+2018) = \xe2\x80\x98, ' (U+2019) = \xe2\x80\x99
+    char *curly_old = strdup(normalized_old);
+    if (curly_old) {
+        char *q = curly_old;
+        for (char *p = curly_old; *p; p++) {
+            if ((unsigned char)*p == 0xe2 && p[1] && p[2]) {
+                unsigned char seq3 = (unsigned char)p[2];
+                if ((unsigned char)p[1] == 0x80) {
+                    if (seq3 == 0x9c || seq3 == 0x9d) { *q++ = '"'; p += 2; continue; }
+                    if (seq3 == 0x98 || seq3 == 0x99) { *q++ = '\''; p += 2; continue; }
+                }
+            }
+            *q++ = *p;
+        }
+        *q = '\0';
+    }
+    // Search with curly-quote-normalized version
+    char *search_str = curly_old ? curly_old : normalized_old;
+
+    // Find first occurrence
+    char *pos = strstr(normalized, search_str);
+    if (!pos) {
+        // Try case-insensitive fuzzy search as fallback
+        int fuzzy_idx = fuzzy_find_text(normalized, search_str);
+        if (fuzzy_idx >= 0) pos = normalized + fuzzy_idx;
+    }
+    if (!pos) {
+        free(content); free(normalized); free(normalized_old); free(normalized_new); free(curly_old);
+        // Build error with old_string preview
+        char err_buf[512];
+        size_t preview_len = strlen(search_str) < 100 ? strlen(search_str) : 100;
+        snprintf(err_buf, sizeof(err_buf), "old_string not found in file. Searched for: \"%.*s\"", (int)preview_len, search_str);
         *error = strdup(err_buf); return NULL;
     }
 
-    int match_offset = pos - normalized;
-    int new_size = match_offset + strlen(normalized_new) + (strlen(normalized) - match_offset - match_len);
-    char *new_content = malloc(new_size + 1);
-    if (!new_content) {
-        free(content); free(normalized); free(normalized_old); free(normalized_new);
-        *error = strdup("out of memory"); return NULL;
+    // Count occurrences
+    int occurrences = 0;
+    char *check_pos = normalized;
+    while ((check_pos = strstr(check_pos, search_str)) != NULL) { occurrences++; check_pos++; }
+
+    if (!replace_all && occurrences > 1) {
+        free(content); free(normalized); free(normalized_old); free(normalized_new); free(curly_old);
+        char err_buf[256];
+        snprintf(err_buf, sizeof(err_buf), "Found %d occurrences of old_string. Use replace_all=true to replace all, or make old_string more specific.", occurrences);
+        *error = strdup(err_buf); return NULL;
     }
 
-    memcpy(new_content, normalized, match_offset);
-    memcpy(new_content + match_offset, normalized_new, strlen(normalized_new));
-    memcpy(new_content + match_offset + strlen(normalized_new), normalized + match_offset + match_len, strlen(normalized) - match_offset - match_len);
-    new_content[new_size] = '\0';
+    // Build new content
+    Buffer new_content_buf;
+    buffer_init(&new_content_buf);
 
+    if (replace_all) {
+        char *last = normalized;
+        check_pos = normalized;
+        int replaced = 0;
+        while ((pos = strstr(check_pos, search_str)) != NULL) {
+            // Append content before match
+            buffer_append(&new_content_buf, last, pos - last);
+            // Append new string
+            buffer_append_str(&new_content_buf, normalized_new);
+            replaced++;
+            last = pos + strlen(search_str);
+            check_pos = last;
+        }
+        // Append remaining
+        buffer_append_str(&new_content_buf, last);
+        (void)occurrences; // suppress warning
+    } else {
+        // Single replacement
+        int match_offset = pos - normalized;
+        buffer_append(&new_content_buf, normalized, match_offset);
+        buffer_append_str(&new_content_buf, normalized_new);
+        buffer_append_str(&new_content_buf, pos + strlen(search_str));
+    }
+
+    char *new_normalized = new_content_buf.data;
+    new_content_buf.data = NULL;
+    buffer_free(&new_content_buf);
+
+    // Check if content actually changed
+    if (strcmp(file_content, new_normalized) == 0) {
+        free(content); free(normalized); free(normalized_old); free(normalized_new); free(curly_old); free(new_normalized);
+        *error = strdup("No changes made - file content already matches"); return NULL;
+    }
+
+    // Restore line endings
+    char *final_content = new_normalized;
     if (has_crlf) {
-        char *restored = restore_line_endings(new_content, 1);
-        free(new_content);
-        if (!restored) { free(content); free(normalized); free(normalized_old); free(normalized_new); *error = strdup("out of memory"); return NULL; }
-        new_content = restored;
+        char *restored = restore_line_endings(new_normalized, 1);
+        if (restored) { free(new_normalized); final_content = restored; }
     }
 
-    if (strcmp(file_content, new_content) == 0) {
-        free(content); free(normalized); free(normalized_old); free(normalized_new); free(new_content);
-        *error = strdup("No changes made"); return NULL;
+    // Write atomically
+    size_t final_len = strlen(final_content);
+    if (write_file_atomically(fp, final_content, final_len) != 0) {
+        free(content); free(normalized); free(normalized_old); free(normalized_new); free(curly_old); free(final_content);
+        free(fp); *error = strdup("failed to write file"); return NULL;
     }
 
-    f = utf8_fopen(path->valuestring, "wb");
-    if (!f) { free(content); free(normalized); free(normalized_old); free(normalized_new); free(new_content); *error = strdup("failed to write"); return NULL; }
-    if (bom_len > 0) fwrite("\xEF\xBB\xBF", 1, 3, f);
-    fwrite(new_content, 1, strlen(new_content), f);
-    fclose(f);
+    // Build result message
+    int replaced_count = replace_all ? occurrences : 1;
+    char *result = malloc(256 + strlen(fp) + strlen(normalized_new));
+    if (result) {
+        if (replace_all) {
+            snprintf(result, 256 + strlen(fp) + strlen(normalized_new),
+                "File edited successfully (%d occurrences replaced)", replaced_count);
+        } else {
+            snprintf(result, 256 + strlen(fp) + strlen(normalized_new),
+                "File edited successfully");
+        }
+    } else {
+        result = strdup("File edited successfully");
+    }
 
-    free(content); free(normalized); free(normalized_old); free(normalized_new); free(new_content);
-    return strdup("File edited successfully");
+    free(content); free(normalized); free(normalized_old); free(normalized_new); free(curly_old); free(final_content);
+    free(fp);
+    return result;
 }
 
 // ============== Grep tool ==============
