@@ -64,9 +64,9 @@ char *provider_chat_sync(Provider *p, cJSON *messages) {
         cJSON_Delete(body);
         
         snprintf(headers, sizeof(headers),
-            "Content-Type: application/json\r\n"
-            "x-api-key: %s\r\n"
-            "anthropic-version: 2023-06-01\r\n",
+            "Content-Type: application/json\n"
+            "x-api-key: %s\n"
+            "anthropic-version: 2023-06-01\n",
             p->api_key);
         
         if (p->base_url) {
@@ -86,8 +86,8 @@ char *provider_chat_sync(Provider *p, cJSON *messages) {
         cJSON_Delete(body);
         
         snprintf(headers, sizeof(headers),
-            "Content-Type: application/json\r\n"
-            "Authorization: Bearer %s\r\n",
+            "Content-Type: application/json\n"
+            "Authorization: Bearer %s\n",
             p->api_key);
         
         if (p->base_url) {
@@ -436,9 +436,9 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
         cJSON_Delete(body);
 
         snprintf(headers, sizeof(headers),
-            "Content-Type: application/json\r\n"
-            "x-api-key: %s\r\n"
-            "anthropic-version: 2023-06-01\r\n",
+            "Content-Type: application/json\n"
+            "x-api-key: %s\n"
+            "anthropic-version: 2023-06-01\n",
             p->api_key);
 
         if (p->base_url) {
@@ -458,8 +458,8 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
         cJSON_Delete(body);
         
         snprintf(headers, sizeof(headers),
-            "Content-Type: application/json\r\n"
-            "Authorization: Bearer %s\r\n",
+            "Content-Type: application/json\n"
+            "Authorization: Bearer %s\n",
             p->api_key);
         
         if (p->base_url) {
