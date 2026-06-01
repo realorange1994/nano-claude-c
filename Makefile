@@ -1,37 +1,18 @@
-# NanoClaude-C - Linux Makefile
-# Cross-platform: Windows uses MSVC (quick_build.bat), Linux uses this Makefile
+# NanoClaude-C - Linux Makefile (musl-gcc static build)
 
-CC = gcc
-CFLAGS = -Wall -Wextra -Wno-unused-parameter -O2
-LDFLAGS =
+CC = /home/work/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc
+CFLAGS = -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -Wno-stringop-truncation -O2
+LDFLAGS = -static
 
-# Source files
-SRCS = \
-	src/main.c \
-	src/http.c \
-	src/buffer.c \
-	src/config.c \
-	src/history.c \
-	src/provider.c \
-	src/calc.c \
-	src/glob.c \
-	src/rgrep.c \
-	src/tool.c \
-	src/tool_impl.c \
-	src/jsonrpc.c \
-	src/repl.c \
-	deps/cJSON/cJSON.c
-
+SRCS = src/main.c src/http.c src/buffer.c src/config.c src/history.c src/provider.c src/calc.c src/glob.c src/rgrep.c src/tool.c src/tool_impl.c src/jsonrpc.c src/repl.c deps/cJSON/cJSON.c
 OBJS = $(SRCS:.c=.o)
 
-# Include paths
-CFLAGS += -Ideps/cJSON -Isrc
+CFLAGS += -Ideps/cJSON -Isrc -Ideps/curl-install/include -Ideps/openssl-install/include
 
-# Linux dependencies
-LDFLAGS += -lcurl -lm -lpthread -rdynamic
-
-# Backtrace support
-LDFLAGS += -ldl
+CURL_LIB = deps/curl-install/lib/libcurl.a
+SSL_LIBS = deps/openssl-install/lib/libssl.a deps/openssl-install/lib/libcrypto.a
+ZLIB     = deps/zlib-install/lib/libz.a
+LDFLAGS += $(CURL_LIB) $(SSL_LIBS) $(ZLIB) -lm -lpthread -ldl
 
 TARGET = nanoclaude-c
 
@@ -42,7 +23,6 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
 
-# Generic compile rule
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 

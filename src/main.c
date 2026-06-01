@@ -21,18 +21,21 @@ static LONG WINAPI global_crash_handler(EXCEPTION_POINTERS *ep) {
 }
 #else
 #include <signal.h>
+#if defined(__GLIBC__)
 #include <execinfo.h>
+#define HAS_BACKTRACE
+#endif
 
 static void global_crash_handler(int sig) {
-    void *stack[64];
-    int n = backtrace(stack, 64);
-    fprintf(stderr, "\n[CRASH] Signal %d (%s)\n", sig,
-            sig == SIGSEGV ? "SIGSEGV" :
-            sig == SIGABRT ? "SIGABRT" :
-            sig == SIGBUS  ? "SIGBUS" :
-            sig == SIGFPE  ? "SIGFPE" :
-            sig == SIGILL  ? "SIGILL" : "unknown");
-    backtrace_symbols_fd(stack, n, 2);
+/*     void *stack[64]; */
+/*     int n = backtrace(stack, 64); */
+/*     fprintf(stderr, "\n[CRASH] Signal %d (%s)\n", sig, */
+/*             sig == SIGSEGV ? "SIGSEGV" : */
+/*             sig == SIGABRT ? "SIGABRT" : */
+/*             sig == SIGBUS  ? "SIGBUS" : */
+/*             sig == SIGFPE  ? "SIGFPE" : */
+/*             sig == SIGILL  ? "SIGILL" : "unknown"); */
+/*     backtrace_symbols_fd(stack, n, 2); */
     fflush(stderr);
     printf("\n[Process crashed: signal %d]\n", sig);
     fflush(stdout);
