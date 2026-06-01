@@ -37,21 +37,21 @@ void buffer_clear(Buffer *buf) {
 }
 
 void buffer_reserve(Buffer *buf, size_t capacity) {
-    if (capacity > buf->capacity) {
-        size_t new_capacity = buf->capacity;
-        while (new_capacity < capacity) {
-            new_capacity *= GROWTH_FACTOR;
-        }
-        char *new_data = realloc(buf->data, new_capacity);
-        if (!new_data) {
-            // Try smaller allocation
-            new_capacity = capacity;
-            new_data = realloc(buf->data, new_capacity);
-            if (!new_data) return;  // Fail gracefully
-        }
-        buf->data = new_data;
-        buf->capacity = new_capacity;
+    if (buf->capacity >= capacity) return;
+    size_t new_capacity = buf->capacity > 0 ? buf->capacity : INITIAL_CAPACITY;
+    while (new_capacity < capacity) {
+        new_capacity *= GROWTH_FACTOR;
     }
+    char *new_data = realloc(buf->data, new_capacity);
+    if (!new_data) {
+        new_data = realloc(buf->data, capacity);
+        if (!new_data) return;
+        buf->data = new_data;
+        buf->capacity = capacity;
+        return;
+    }
+    buf->data = new_data;
+    buf->capacity = new_capacity;
 }
 
 void buffer_append(Buffer *buf, const char *data, size_t len) {

@@ -3,6 +3,7 @@
 #endif
 #include "http.h"
 #include "buffer.h"
+#include "compat.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -25,15 +26,6 @@ void http_cleanup(void) {
 
 #ifdef _WIN32
 // --- Windows: WinHTTP implementation -------------------------------------------------------
-
-static wchar_t *utf8_to_wide(const char *utf8) {
-    if (!utf8) return NULL;
-    int size = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
-    if (size <= 0) return NULL;
-    wchar_t *result = malloc(size * sizeof(wchar_t));
-    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, result, size);
-    return result;
-}
 
 #else
 // --- Linux/macOS: libcurl helpers -----------------------------------------------------------
@@ -287,7 +279,8 @@ char *http_post(const char *url, const char *headers_str, const char *body, int 
     }
     WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
 
-    char *response = buffer_c_str(&buf);
+    char *response = buffer_steal(&buf);
+    if (!response) response = strdup("");
     buffer_free(&buf);
     return response;
 
@@ -386,7 +379,9 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
         }
         if (host_len > 255) host_len = 255;
         strncpy(host, host_start, host_len);
-        strcpy(path, path_start);
+        host[host_len] = '\0';
+        strncpy(path, path_start, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
     } else {
         size_t host_len = strlen(host_start);
         if (colon) {
@@ -396,7 +391,8 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
         }
         if (host_len > 255) host_len = 255;
         strncpy(host, host_start, host_len);
-        strcpy(path, "/");
+        host[host_len] = '\0';
+        strncpy(path, "/", sizeof(path));
     }
 
     int use_ssl = (strcmp(scheme, "https") == 0) ? 1 : 0;
@@ -610,7 +606,8 @@ char *http_get(const char *url, int timeout_ms) {
     }
     WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
 
-    char *response = buffer_c_str(&buf);
+    char *response = buffer_steal(&buf);
+    if (!response) response = strdup("");
     buffer_free(&buf);
     return response;
 

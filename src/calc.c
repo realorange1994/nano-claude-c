@@ -282,11 +282,11 @@ static double eval_func(const char *name, double *args, int n, CalcContext *ctx)
     }
     
     if (strcmp(name, "fact") == 0 && n >= 1) {
-        int64_t n = (int64_t)args[0];
-        if (n < 0) return NAN;
-        if (n == 0 || n == 1) return 1;
+        int64_t ni = (int64_t)args[0];
+        if (ni < 0) return NAN;
+        if (ni == 0 || ni == 1) return 1;
         double result = 1;
-        for (int64_t i = 2; i <= n; i++) result *= i;
+        for (int64_t i = 2; i <= ni; i++) result *= i;
         return result;
     }
     
@@ -322,13 +322,7 @@ static double parse_expr(Parser *p) {
 // Parse factor: * / % and implicit multiplication
 static double parse_factor(Parser *p) {
     double left = parse_power(p);
-    
-    // Handle factorial (!)
-    if (p->current.type == TOKEN_MUL && p->current.type != TOKEN_EOF) {
-        // Check if it's actually '!' (but TOKEN_MUL is '*')
-        // We need to add factorial handling in parse_primary or here
-    }
-    
+
     while (1) {
         // Handle factorial operator (!)
         // Note: We detect '!' by checking the char directly since it's not a token

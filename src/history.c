@@ -109,6 +109,7 @@ void history_add_tool_call(History *h, const char *tool_id, const char *tool_nam
     e->role = ROLE_ASSISTANT;
     // Save the original tool_call ID in parent_id (don't overwrite with generated ID)
     strncpy(e->parent_id, tool_id ? tool_id : "", sizeof(e->parent_id) - 1);
+    e->parent_id[sizeof(e->parent_id) - 1] = '\0';
     e->tool_name = tool_name ? strdup(tool_name) : NULL;
     e->content = tool_input_json ? strdup(tool_input_json) : strdup("{}");
     // Generate a new unique ID for this entry (separate from tool_call_id)
@@ -370,10 +371,10 @@ void history_compact(History *h, char *(*summarize_fn)(const char *)) {
     char *summary = (*summarize_fn)(buffer_c_str(&old_content));
     buffer_free(&old_content);
 
-    free(h->summary);
-    h->summary = summary;
-
     if (summary && summary[0]) {
+        free(h->summary);
+        h->summary = summary;
+
         // Find cut point
         int cut_point = history_find_cut_point(h);
 

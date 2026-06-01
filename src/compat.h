@@ -3,8 +3,9 @@
 
 #ifdef _WIN32
 
-#ifdef _MSC_BUILD
 #include <windows.h>
+
+#ifdef _MSC_BUILD
 #include <process.h>
 
 // MSVC lacks these POSIX headers - provide replacements
@@ -17,6 +18,18 @@
 #define W_OK 02
 #define F_OK 00
 #endif
+#endif
+
+// Shared UTF-8 to wide string conversion
+static wchar_t *utf8_to_wide(const char *utf8) {
+    if (!utf8) return NULL;
+    int size = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (size <= 0) return NULL;
+    wchar_t *result = malloc(size * sizeof(wchar_t));
+    if (!result) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, result, size);
+    return result;
+}
 
 // Replace sys/time.h - timeval already defined by winsock.h on Windows
 static inline int compat_gettimeofday(struct timeval *tv, void *tz) {

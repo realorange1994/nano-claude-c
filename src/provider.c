@@ -17,13 +17,15 @@ struct Provider {
 Provider *provider_new(ProviderType type, const char *api_key, const char *model, const char *base_url) {
     Provider *p = calloc(1, sizeof(Provider));
     if (!p) return NULL;
-    
     p->type = type;
-    p->api_key = strdup(api_key);
-    p->model = strdup(model);
+    p->api_key = api_key ? strdup(api_key) : NULL;
+    p->model = model ? strdup(model) : NULL;
     p->base_url = base_url ? strdup(base_url) : NULL;
+    if (!p->api_key || !p->model) {
+        free(p->api_key); free(p->model); free(p->base_url); free(p);
+        return NULL;
+    }
     p->max_tokens = 4096;
-    
     return p;
 }
 

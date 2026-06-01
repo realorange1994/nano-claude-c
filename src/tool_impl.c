@@ -52,18 +52,8 @@ static void mkdirs(const char *path) {
     mkdir(tmp, 0755);
 }
 
-// ============== UTF-8 to wide string (Windows only) ==============
+// ============== UTF-8 file operations (Windows only) ==============
 #ifdef _WIN32
-static wchar_t *utf8_to_wide(const char *utf8) {
-    if (!utf8) return NULL;
-    int size = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
-    if (size <= 0) return NULL;
-    wchar_t *result = malloc(size * sizeof(wchar_t));
-    if (!result) return NULL;
-    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, result, size);
-    return result;
-}
-
 static FILE *utf8_fopen(const char *path, const char *mode) {
     wchar_t *w_path = utf8_to_wide(path);
     wchar_t *w_mode = utf8_to_wide(mode);

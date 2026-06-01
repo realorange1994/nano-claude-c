@@ -75,7 +75,7 @@ static void console_signal_handler(int sig) {
         if (last > 0 && now - last < 1500) {
             printf("\nExiting...\n");
             fflush(stdout);
-            _exit(0);
+            _exit(130);
         }
 
         g_repl->last_interrupt_time = now;
@@ -404,18 +404,6 @@ static const char *SUMMARIZATION_PROMPT =
 "## Next Steps\n1. [Ordered list]\n\n"
 "## Critical Context\n- [Data, references]\n";
 
-static char *truncate_for_summary(const char *content, int max_len) {
-    if (!content) return strdup("");
-    int len = strlen(content);
-    if (len <= max_len) return strdup(content);
-    char *result = malloc(max_len + 20);
-    if (result) {
-        memcpy(result, content, max_len);
-        strcpy(result + max_len, "\n...[truncated]...");
-    }
-    return result;
-}
-
 static char *build_history_text(REPL *repl) {
     char *buf = malloc(65536);
     if (!buf) return NULL;
@@ -429,15 +417,15 @@ static char *build_history_text(REPL *repl) {
         char *truncated = NULL;
 
         if (m->tool_name) {
-            truncated = truncate_for_summary(m->content ? m->content : "{}", 500);
+            truncated = history_truncate_content(m->content ? m->content : "{}", 500);
             pos += snprintf(buf + pos, cap - pos, "[ASSISTANT - Tool Call: %s]: %s\n",
                            m->tool_name, truncated);
         } else if (m->tool_result) {
-            truncated = truncate_for_summary(m->tool_result, 500);
+            truncated = history_truncate_content(m->tool_result, 500);
             pos += snprintf(buf + pos, cap - pos, "[TOOL RESULT - %s]: %s\n",
                            m->tool_name ? m->tool_name : "unknown", truncated);
         } else {
-            truncated = truncate_for_summary(m->content ? m->content : "", 1000);
+            truncated = history_truncate_content(m->content ? m->content : "", 1000);
             pos += snprintf(buf + pos, cap - pos, "[%s]: %s\n", role_str, truncated);
         }
         free(truncated);
@@ -488,7 +476,6 @@ static void repl_run_compaction(REPL *repl) {
     cJSON_Delete(messages);
 
     if (summary && summary[0]) {
-        // Use history_compact which handles cut point and orphan cleanup
         free(repl->history.summary);
         repl->history.summary = summary;
         printf("[History summarized. Continuing...]\n");
@@ -496,27 +483,6 @@ static void repl_run_compaction(REPL *repl) {
         free(summary);
         printf("[Compaction failed: no summary generated]\n");
     }
-}
-
-// ============================================================================
-// Time context injection (like miniclaude's InjectTimeContext)
-// ============================================================================
-
-static void history_inject_time(History *h) {
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    char timebuf[128];
-    strftime(timebuf, sizeof(timebuf), "[Current time: %Y-%m-%d %H:%M:%S]", t);
-
-    for (int i = h->count - 1; i >= 0; i--) {
-        if (h->entries[i].type == ENTRY_SYSTEM && h->entries[i].content &&
-            strncmp(h->entries[i].content, "[Current time:", 14) == 0) {
-            free(h->entries[i].content);
-            h->entries[i].content = strdup(timebuf);
-            return;
-        }
-    }
-    history_add_system(h, timebuf);
 }
 
 // ============================================================================
@@ -680,7 +646,7 @@ int repl_run(REPL *repl) {
             repl_accum_reset(repl);
 
             // Inject current time (like miniclaude's InjectTimeContext)
-            history_inject_time(&repl->history);
+            history_inject_time_context(&repl->history);
 
             // Get messages for API
             cJSON *messages = history_to_messages(&repl->history);

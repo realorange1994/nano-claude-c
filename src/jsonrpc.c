@@ -114,7 +114,10 @@ static char *send_request(MCPClient *mcp, cJSON *request) {
 MCPClient *mcp_client_new(const char *name, const char *command) {
     MCPClient *mcp = calloc(1, sizeof(MCPClient));
     if (!mcp) return NULL;
-    mcp->name = strdup(name); mcp->command = strdup(command); mcp->next_id = 1;
+    mcp->name = name ? strdup(name) : NULL;
+    mcp->command = command ? strdup(command) : NULL;
+    if (!mcp->name || !mcp->command) { free(mcp->name); free(mcp->command); free(mcp); return NULL; }
+    mcp->next_id = 1;
     return mcp;
 }
 
@@ -325,7 +328,10 @@ static char *send_request(MCPClient *mcp, cJSON *request) {
 MCPClient *mcp_client_new(const char *name, const char *command) {
     MCPClient *mcp = calloc(1, sizeof(MCPClient));
     if (!mcp) return NULL;
-    mcp->name = strdup(name); mcp->command = strdup(command); mcp->next_id = 1;
+    mcp->name = name ? strdup(name) : NULL;
+    mcp->command = command ? strdup(command) : NULL;
+    if (!mcp->name || !mcp->command) { free(mcp->name); free(mcp->command); free(mcp); return NULL; }
+    mcp->next_id = 1;
     return mcp;
 }
 

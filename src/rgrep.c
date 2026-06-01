@@ -177,10 +177,9 @@ static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *res
                 }
             }
             result->total_matches++;
-            result->files_matched++;
         }
-        if (cfg->max_results > 0 && result->total_matches >= cfg->max_results) break;
     }
+    if (file_matches > 0) result->files_matched++;
     fclose(f);
 }
 

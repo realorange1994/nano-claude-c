@@ -58,8 +58,8 @@ bool config_load(const char *path) {
         return false;
     }
     
-    fread(content, 1, fsize, f);
-    content[fsize] = '\0';
+    size_t read_bytes = fread(content, 1, fsize, f);
+    content[read_bytes] = '\0';
     fclose(f);
     
     // Parse JSON
@@ -74,23 +74,23 @@ bool config_load(const char *path) {
     // Parse fields
     cJSON *item;
     
-    if ((item = cJSON_GetObjectItem(root, "provider"))) {
+    if ((item = cJSON_GetObjectItem(root, "provider")) && item->valuestring) {
         strncpy(g_config.provider, item->valuestring, sizeof(g_config.provider) - 1);
     } else {
         strcpy(g_config.provider, "anthropic");
     }
     
-    if ((item = cJSON_GetObjectItem(root, "api_key"))) {
+    if ((item = cJSON_GetObjectItem(root, "api_key")) && item->valuestring) {
         strncpy(g_config.api_key, item->valuestring, sizeof(g_config.api_key) - 1);
     }
     
-    if ((item = cJSON_GetObjectItem(root, "base_url"))) {
+    if ((item = cJSON_GetObjectItem(root, "base_url")) && item->valuestring) {
         strncpy(g_config.base_url, item->valuestring, sizeof(g_config.base_url) - 1);
     } else {
         g_config.base_url[0] = '\0';
     }
     
-    if ((item = cJSON_GetObjectItem(root, "model"))) {
+    if ((item = cJSON_GetObjectItem(root, "model")) && item->valuestring) {
         strncpy(g_config.model, item->valuestring, sizeof(g_config.model) - 1);
     } else {
         if (strcmp(g_config.provider, "anthropic") == 0) {
@@ -134,7 +134,7 @@ bool config_load(const char *path) {
             cJSON *name = cJSON_GetObjectItem(srv, "name");
             cJSON *cmd = cJSON_GetObjectItem(srv, "command");
             
-            if (name && cmd) {
+            if (name && name->valuestring && cmd && cmd->valuestring) {
                 strncpy(g_config.mcp_servers[i].name, name->valuestring, 127);
                 strncpy(g_config.mcp_servers[i].command, cmd->valuestring, 511);
                 g_config.mcp_count++;
