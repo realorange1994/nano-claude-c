@@ -208,26 +208,66 @@ char *tool_read_file(cJSON *input, char **error) {
         if (val > 0 && val < MAX_READ_LINES) line_limit = val;
     }
 
-    FILE *f = fopen(path->valuestring, "r");
+    FILE *f = utf8_fopen(path->valuestring, "rb");
     if (!f) { *error = strdup("failed to open file"); return NULL; }
 
+    // Read entire file content in binary mode
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    char *raw_content = malloc(fsize + 1);
+    if (!raw_content) { fclose(f); *error = strdup("out of memory"); return NULL; }
+    size_t read_bytes = fread(raw_content, 1, fsize, f);
+    raw_content[read_bytes] = '\0';
+    fclose(f);
+
+    // Strip BOM if present
+    char *content_start = raw_content;
+    if (read_bytes >= 3 && (unsigned char)raw_content[0] == 0xEF &&
+        (unsigned char)raw_content[1] == 0xBB && (unsigned char)raw_content[2] == 0xBF) {
+        content_start = raw_content + 3;
+    }
+
+    // Process line by line from the UTF-8 content
     Buffer lines_buf;
     buffer_init(&lines_buf);
     char line[4096];
     int total_file_lines = 0;
     int lines_read = 0;
 
-    while (fgets(line, sizeof(line), f)) {
-        total_file_lines++;
-        if (total_file_lines <= line_offset) continue;
-        if (lines_read >= line_limit) continue;
-        size_t len = strlen(line);
-        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
-        buffer_append_str(&lines_buf, line);
-        buffer_append_str(&lines_buf, "\n");
-        lines_read++;
+    // Split content into lines
+    char *ptr = content_start;
+    while (*ptr) {
+        char *line_end = strchr(ptr, '\n');
+        if (line_end) {
+            *line_end = '\0';
+            // Also strip \r
+            size_t line_len = strlen(ptr);
+            if (line_len > 0 && ptr[line_len - 1] == '\r') ptr[--line_len] = '\0';
+
+            total_file_lines++;
+            if (total_file_lines > line_offset && lines_read < line_limit) {
+                buffer_append_str(&lines_buf, ptr);
+                buffer_append_str(&lines_buf, "\n");
+                lines_read++;
+            }
+
+            ptr = line_end + 1;
+        } else {
+            // Last line (no trailing newline)
+            if (*ptr) {
+                total_file_lines++;
+                if (total_file_lines > line_offset && lines_read < line_limit) {
+                    buffer_append_str(&lines_buf, ptr);
+                    buffer_append_str(&lines_buf, "\n");
+                    lines_read++;
+                }
+            }
+            break;
+        }
     }
-    fclose(f);
+    free(raw_content);
 
     char *result = lines_buf.data ? lines_buf.data : strdup("");
     lines_buf.data = NULL; lines_buf.len = 0; lines_buf.capacity = 0;
@@ -264,7 +304,7 @@ char *tool_write_file(cJSON *input, char **error) {
 
     // Create parent directories
     char dir_buf[4096];
-    strncpy(dir_buf, path->valuestring, sizeof(dir_buf) - 1);
+    strncpy(dir_buf, path, sizeof(dir_buf) - 1);
     dir_buf[sizeof(dir_buf) - 1] = '\0';
     char *last_sep = strrchr(dir_buf, '/');
     if (!last_sep) last_sep = strrchr(dir_buf, '\\');
@@ -273,7 +313,7 @@ char *tool_write_file(cJSON *input, char **error) {
         mkdirs(dir_buf);
     }
 
-    FILE *f = utf8_fopen(path->valuestring, "w");
+    FILE *f = utf8_fopen(path, "wb");
     if (!f) { *error = strdup("failed to open file for writing"); return NULL; }
 
     fwrite(content->valuestring, 1, strlen(content->valuestring), f);
@@ -346,7 +386,7 @@ char *tool_edit_file(cJSON *input, char **error) {
     if (!old_str || !old_str->valuestring) { *error = strdup("missing old_string"); return NULL; }
     if (!new_str || !new_str->valuestring) { *error = strdup("missing new_string"); return NULL; }
 
-    FILE *f = utf8_fopen(path->valuestring, "r");
+    FILE *f = utf8_fopen(path->valuestring, "rb");
     if (!f) { *error = strdup("failed to open file"); return NULL; }
 
     fseek(f, 0, SEEK_END);
@@ -427,7 +467,7 @@ char *tool_edit_file(cJSON *input, char **error) {
         *error = strdup("No changes made"); return NULL;
     }
 
-    f = utf8_fopen(path->valuestring, "w");
+    f = utf8_fopen(path->valuestring, "wb");
     if (!f) { free(content); free(normalized); free(normalized_old); free(normalized_new); free(new_content); *error = strdup("failed to write"); return NULL; }
     if (bom_len > 0) fwrite("\xEF\xBB\xBF", 1, 3, f);
     fwrite(new_content, 1, strlen(new_content), f);
