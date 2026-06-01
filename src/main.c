@@ -1,24 +1,44 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
 #include "config.h"
 #include "provider.h"
 #include "tool.h"
 #include "repl.h"
 #include "http.h"
 
-// Global crash handler - catches any unhandled exception
+#ifdef _WIN32
+#include <windows.h>
+
 static LONG WINAPI global_crash_handler(EXCEPTION_POINTERS *ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     fprintf(stderr, "\n[CRASH] Exception code: 0x%08X\n", code);
     fprintf(stderr, "[CRASH] Address: %p\n", (void*)(uintptr_t)ep->ExceptionRecord->ExceptionAddress);
     fflush(stderr);
-    // Print a simple message to stdout so the user sees something
     printf("\n[Process crashed: exception 0x%08X]\n", code);
     fflush(stdout);
     return EXCEPTION_EXECUTE_HANDLER;
 }
+#else
+#include <signal.h>
+#include <execinfo.h>
+
+static void global_crash_handler(int sig) {
+    void *stack[64];
+    int n = backtrace(stack, 64);
+    fprintf(stderr, "\n[CRASH] Signal %d (%s)\n", sig,
+            sig == SIGSEGV ? "SIGSEGV" :
+            sig == SIGABRT ? "SIGABRT" :
+            sig == SIGBUS  ? "SIGBUS" :
+            sig == SIGFPE  ? "SIGFPE" :
+            sig == SIGILL  ? "SIGILL" : "unknown");
+    backtrace_symbols_fd(stack, n, 2);
+    fflush(stderr);
+    printf("\n[Process crashed: signal %d]\n", sig);
+    fflush(stdout);
+    _exit(1);
+}
+#endif
 
 static void print_help(const char *prog) {
     printf("NanoClaude-C - Pure C AI Agent\n");
@@ -38,20 +58,24 @@ static void print_help(const char *prog) {
 }
 
 int main(int argc, char *argv[]) {
-    // Set up global crash handler FIRST
+#ifdef _WIN32
     SetUnhandledExceptionFilter(global_crash_handler);
-
-    // Setup console for UTF-8
     SetConsoleOutputCP(65001);
     SetConsoleCP(65001);
+#else
+    signal(SIGSEGV, global_crash_handler);
+    signal(SIGABRT, global_crash_handler);
+    signal(SIGBUS, global_crash_handler);
+    signal(SIGFPE, global_crash_handler);
+    signal(SIGILL, global_crash_handler);
+#endif
 
     const char *config_path = NULL;
     const char *model_override = NULL;
     const char *provider_override = NULL;
     const char *api_key_override = NULL;
     const char *base_url_override = NULL;
-    
-    // Parse arguments
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_help(argv[0]);
@@ -72,13 +96,11 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
-    
-    // Load config
+
     if (!config_load(config_path)) {
         fprintf(stderr, "Warning: Using default config\n");
     }
-    
-    // Apply overrides
+
     ProviderType provider_type = PROVIDER_ANTHROPIC;
     if (provider_override) {
         if (strcmp(provider_override, "openai") == 0) {
@@ -89,7 +111,7 @@ int main(int argc, char *argv[]) {
             provider_type = PROVIDER_OPENAI;
         }
     }
-    
+
     const char *api_key = api_key_override;
     if (!api_key) {
         if (provider_type == PROVIDER_ANTHROPIC) {
@@ -101,34 +123,29 @@ int main(int argc, char *argv[]) {
     if (!api_key || !*api_key) {
         api_key = g_config.api_key;
     }
-    
+
     if (!api_key || !*api_key) {
         fprintf(stderr, "Error: API key required. Set ANTHROPIC_API_KEY or --api-key\n");
         return 1;
     }
-    
+
     const char *model = model_override ? model_override : g_config.model;
     const char *base_url = base_url_override ? base_url_override : g_config.base_url;
-    
-    // Initialize HTTP
+
     http_init();
-    
-    // Create provider
+
     Provider *provider = provider_new(provider_type, api_key, model, base_url);
     if (!provider) {
         fprintf(stderr, "Error: Failed to create provider\n");
         http_cleanup();
         return 1;
     }
-    
-    // Create tool registry
+
     ToolRegistry *tools = tool_registry_new();
     tool_register_builtins(tools);
-    
-    // Create REPL
+
     REPL *repl = repl_new(provider, tools);
-    
-    // Add MCP servers from config
+
     for (int i = 0; i < g_config.mcp_count; i++) {
         if (repl_add_mcp(repl, tools, g_config.mcp_servers[i].name, g_config.mcp_servers[i].command)) {
             printf("Connected to MCP server: %s\n", g_config.mcp_servers[i].name);
@@ -136,16 +153,14 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Failed to connect to MCP server: %s\n", g_config.mcp_servers[i].name);
         }
     }
-    
-    // Run REPL
+
     int result = repl_run(repl);
-    
-    // Cleanup
+
     repl_free(repl);
     tool_registry_free(tools);
     provider_free(provider);
     http_cleanup();
     config_free();
-    
+
     return result;
 }

@@ -4,16 +4,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 // Tool registry
 int g_in_tool = 0;
 
-// Tool timeout flag (set to 1 to request cancellation)
+// Tool timeout flag
+#ifdef _WIN32
 volatile LONG g_tool_timeout = 0;
-
-// Interruption flag (set by Ctrl+C handler)
 volatile LONG g_interrupted = 0;
+#else
+volatile int g_tool_timeout = 0;
+volatile int g_interrupted = 0;
+#endif
 
 ToolRegistry *tool_registry_new(void) {
     ToolRegistry *reg = calloc(1, sizeof(ToolRegistry));
@@ -41,7 +47,6 @@ bool tool_register(ToolRegistry *reg, const char *name, const char *description,
     if (reg->count >= MAX_TOOLS) return false;
     Tool *t = calloc(1, sizeof(Tool));
     if (!t) return false;
-
     t->name = name ? strdup(name) : NULL;
     t->description = description ? strdup(description) : NULL;
     t->input_schema = input_schema;
@@ -56,11 +61,10 @@ bool tool_registry_register_mcp(ToolRegistry *reg, const char *name, const char 
     if (reg->count >= MAX_TOOLS) return false;
     Tool *t = calloc(1, sizeof(Tool));
     if (!t) return false;
-
-    t->name = name;  // already strdup'd by caller
-    t->description = description;  // already strdup'd by caller
+    t->name = name;
+    t->description = description;
     t->input_schema = input_schema;
-    t->func = NULL;  // MCP tools are dispatched directly in tool_execute
+    t->func = NULL;
     t->mcp_binding = binding;
     reg->tools[reg->count++] = t;
     return true;
@@ -69,9 +73,7 @@ bool tool_registry_register_mcp(ToolRegistry *reg, const char *name, const char 
 Tool *tool_find(ToolRegistry *reg, const char *name) {
     if (!reg || !name) return NULL;
     for (int i = 0; i < reg->count; i++) {
-        if (strcmp(reg->tools[i]->name, name) == 0) {
-            return reg->tools[i];
-        }
+        if (strcmp(reg->tools[i]->name, name) == 0) return reg->tools[i];
     }
     return NULL;
 }
@@ -79,9 +81,15 @@ Tool *tool_find(ToolRegistry *reg, const char *name) {
 // Tool timeout (30 seconds)
 #define TOOL_TIMEOUT_MS 30000
 
-// Get current tick count (Windows)
-static DWORD tool_get_tick_count(void) {
-    return GetTickCount();
+// Get current time in ms
+static long long tool_get_time_ms(void) {
+#ifdef _WIN32
+    return (long long)GetTickCount();
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+#endif
 }
 
 char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **error) {
@@ -101,26 +109,19 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
         return NULL;
     }
 
-    // Create empty object if no input provided
     cJSON *args = input;
     bool created_args = false;
-    if (!args) {
-        args = cJSON_CreateObject();
-        created_args = true;
-    }
+    if (!args) { args = cJSON_CreateObject(); created_args = true; }
 
     g_in_tool = 1;
     g_interrupted = 0;
 
-    // Set up timeout
-    DWORD start_tick = tool_get_tick_count();
+    long long start_tick = tool_get_time_ms();
     g_tool_timeout = 0;
 
-    // Execute tool with Windows SEH crash protection
     char *result = NULL;
     int should_skip = 0;
 
-    // Check for interruption before executing
     if (g_interrupted) {
         if (error) *error = strdup("interrupted");
         should_skip = 1;
@@ -128,11 +129,9 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
 
     if (!should_skip) {
         if (tool->mcp_binding) {
-            // MCP tool - call via jsonrpc
             MCPToolBinding *b = tool->mcp_binding;
             cJSON *result_obj = mcp_call_tool(b->mcp, b->tool_name, args);
             if (result_obj) {
-                // Extract text content from MCP result
                 cJSON *content_arr = cJSON_GetObjectItem(result_obj, "content");
                 if (content_arr && cJSON_GetArraySize(content_arr) > 0) {
                     Buffer mcp_buf;
@@ -143,27 +142,26 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
                         cJSON *ctype = cJSON_GetObjectItem(citem, "type");
                         if (ctype && ctype->valuestring && strcmp(ctype->valuestring, "text") == 0) {
                             cJSON *ctext = cJSON_GetObjectItem(citem, "text");
-                            if (ctext && ctext->valuestring) {
-                                buffer_append_str(&mcp_buf, ctext->valuestring);
-                            }
+                            if (ctext && ctext->valuestring) buffer_append_str(&mcp_buf, ctext->valuestring);
                         }
                     }
                     result = buffer_steal(&mcp_buf);
                 }
                 cJSON_Delete(result_obj);
             }
-            if (!result && error && !*error) {
-                *error = strdup("MCP tool returned no result");
-            }
+            if (!result && error && !*error) *error = strdup("MCP tool returned no result");
         } else {
+#ifdef _WIN32
             __try {
                 result = tool->func(args, error);
             } __except(EXCEPTION_EXECUTE_HANDLER) {
                 if (result) { free(result); result = NULL; }
-                if (error && !*error) {
-                    *error = strdup("tool crashed and was recovered");
-                }
+                if (error && !*error) *error = strdup("tool crashed and was recovered");
             }
+#else
+            // On Linux, no SEH - just call directly
+            result = tool->func(args, error);
+#endif
         }
     }
 
@@ -173,14 +171,11 @@ char *tool_execute(ToolRegistry *reg, const char *name, cJSON *input, char **err
 
     if (created_args) cJSON_Delete(args);
 
-    // Check timeout
-    DWORD elapsed = tool_get_tick_count() - start_tick;
+    long long elapsed = tool_get_time_ms() - start_tick;
     if (elapsed > TOOL_TIMEOUT_MS) {
         g_tool_timeout = 1;
         if (result) { free(result); result = NULL; }
-        if (error && !*error) {
-            *error = strdup("tool execution timeout (>30s)");
-        }
+        if (error && !*error) *error = strdup("tool execution timeout (>30s)");
     }
 
     return result;
@@ -225,71 +220,44 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON *grep_props = cJSON_CreateObject();
     cJSON *pat_prop = cJSON_CreateObject(); cJSON_AddItemToObject(pat_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(pat_prop, "description", cJSON_CreateString("REQUIRED: The regex pattern to search for")); cJSON_AddItemToObject(grep_props, "pattern", pat_prop);
     cJSON *gpath_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gpath_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gpath_prop, "description", cJSON_CreateString("Path to search in (default: current directory)")); cJSON_AddItemToObject(grep_props, "path", gpath_prop);
-    cJSON *glob_prop = cJSON_CreateObject(); cJSON_AddItemToObject(glob_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(glob_prop, "description", cJSON_CreateString("Glob pattern to filter files (e.g., '*.go', '**/*.txt')")); cJSON_AddItemToObject(grep_props, "glob", glob_prop);
-    cJSON *ftype_prop = cJSON_CreateObject(); cJSON_AddItemToObject(ftype_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(ftype_prop, "description", cJSON_CreateString("File type filter (e.g., 'go', 'py', 'js', 'txt')")); cJSON_AddItemToObject(grep_props, "fileType", ftype_prop);
-    cJSON *ctx_prop = cJSON_CreateObject(); cJSON_AddItemToObject(ctx_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(ctx_prop, "description", cJSON_CreateString("Lines of context before and after matches")); cJSON_AddItemToObject(grep_props, "context", ctx_prop);
-    cJSON *mcnt_prop = cJSON_CreateObject(); cJSON_AddItemToObject(mcnt_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(mcnt_prop, "description", cJSON_CreateString("Maximum matches per file (default: 100, 0 = unlimited)")); cJSON_AddItemToObject(grep_props, "maxCount", mcnt_prop);
-    cJSON *mres_prop = cJSON_CreateObject(); cJSON_AddItemToObject(mres_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(mres_prop, "description", cJSON_CreateString("Maximum total results (default: 250)")); cJSON_AddItemToObject(grep_props, "maxResults", mres_prop);
-    cJSON *omode_prop = cJSON_CreateObject(); cJSON_AddItemToObject(omode_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(omode_prop, "description", cJSON_CreateString("Output mode: 'content' (default), 'files_with_matches', 'count'")); cJSON_AddItemToObject(grep_props, "outputMode", omode_prop);
-    cJSON *ibinary_prop = cJSON_CreateObject(); cJSON_AddItemToObject(ibinary_prop, "type", cJSON_CreateString("boolean")); cJSON_AddItemToObject(ibinary_prop, "description", cJSON_CreateString("Include binary files in search (default: false)")); cJSON_AddItemToObject(grep_props, "includeBinary", ibinary_prop);
-    cJSON *cs_prop = cJSON_CreateObject(); cJSON_AddItemToObject(cs_prop, "type", cJSON_CreateString("boolean")); cJSON_AddItemToObject(cs_prop, "description", cJSON_CreateString("Case sensitive matching (default: false)")); cJSON_AddItemToObject(grep_props, "caseSensitive", cs_prop);
-    cJSON *mll_prop = cJSON_CreateObject(); cJSON_AddItemToObject(mll_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(mll_prop, "description", cJSON_CreateString("Maximum line length to include (default: 500)")); cJSON_AddItemToObject(grep_props, "maxLineLength", mll_prop);
+    cJSON *glob_prop = cJSON_CreateObject(); cJSON_AddItemToObject(glob_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(glob_prop, "description", cJSON_CreateString("Glob pattern to filter files")); cJSON_AddItemToObject(grep_props, "glob", glob_prop);
+    cJSON *ftype_prop = cJSON_CreateObject(); cJSON_AddItemToObject(ftype_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(ftype_prop, "description", cJSON_CreateString("File type filter")); cJSON_AddItemToObject(grep_props, "fileType", ftype_prop);
+    cJSON *ctx_prop = cJSON_CreateObject(); cJSON_AddItemToObject(ctx_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(ctx_prop, "description", cJSON_CreateString("Lines of context")); cJSON_AddItemToObject(grep_props, "context", ctx_prop);
+    cJSON *mcnt_prop = cJSON_CreateObject(); cJSON_AddItemToObject(mcnt_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(mcnt_prop, "description", cJSON_CreateString("Max matches per file")); cJSON_AddItemToObject(grep_props, "maxCount", mcnt_prop);
+    cJSON *mres_prop = cJSON_CreateObject(); cJSON_AddItemToObject(mres_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(mres_prop, "description", cJSON_CreateString("Max total results")); cJSON_AddItemToObject(grep_props, "maxResults", mres_prop);
+    cJSON *omode_prop = cJSON_CreateObject(); cJSON_AddItemToObject(omode_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(omode_prop, "description", cJSON_CreateString("Output mode: content, files_with_matches, count")); cJSON_AddItemToObject(grep_props, "outputMode", omode_prop);
     cJSON_AddItemToObject(grep_schema, "properties", grep_props);
     cJSON *grep_required = cJSON_CreateArray(); cJSON_AddItemToArray(grep_required, cJSON_CreateString("pattern")); cJSON_AddItemToObject(grep_schema, "required", grep_required);
-    tool_register(reg, "Grep", "Search file contents for a pattern. Supports regex patterns, glob filters, file type filters, and context lines.", grep_schema, tool_grep);
+    tool_register(reg, "Grep", "Search file contents for a pattern.", grep_schema, tool_grep);
 
     // Glob tool
-    cJSON *glob_schema = cJSON_CreateObject();
-    cJSON_AddItemToObject(glob_schema, "type", cJSON_CreateString("object"));
-    cJSON *glob_props = cJSON_CreateObject();
-    cJSON *gpat_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gpat_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gpat_prop, "description", cJSON_CreateString("REQUIRED: Glob pattern to match files, e.g. '*.go', '**/*.json'")); cJSON_AddItemToObject(glob_props, "pattern", gpat_prop);
-    cJSON *gglob_path_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gglob_path_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gglob_path_prop, "description", cJSON_CreateString("Directory to search in (default: .)")); cJSON_AddItemToObject(glob_props, "path", gglob_path_prop);
-    cJSON *gtype_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gtype_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gtype_prop, "description", cJSON_CreateString("Type filter: 'file' (default), 'dir', 'all'")); cJSON_AddItemToObject(glob_props, "type", gtype_prop);
-    cJSON *gres_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gres_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(gres_prop, "description", cJSON_CreateString("Maximum results to return (default: 100)")); cJSON_AddItemToObject(glob_props, "maxResults", gres_prop);
-    cJSON_AddItemToObject(glob_schema, "properties", glob_props);
-    cJSON *glob_required = cJSON_CreateArray(); cJSON_AddItemToArray(glob_required, cJSON_CreateString("pattern")); cJSON_AddItemToObject(glob_schema, "required", glob_required);
-    tool_register(reg, "Glob", "Search for files by glob pattern. Supports recursive matching (**) and type filtering.", glob_schema, tool_glob);
+    cJSON *gschema = cJSON_CreateObject();
+    cJSON_AddItemToObject(gschema, "type", cJSON_CreateString("object"));
+    cJSON *gprops = cJSON_CreateObject();
+    cJSON *gpat_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gpat_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gpat_prop, "description", cJSON_CreateString("Glob pattern")); cJSON_AddItemToObject(gprops, "pattern", gpat_prop);
+    cJSON *gglob_path_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gglob_path_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gglob_path_prop, "description", cJSON_CreateString("Directory to search")); cJSON_AddItemToObject(gprops, "path", gglob_path_prop);
+    cJSON *gtype_prop = cJSON_CreateObject(); cJSON_AddItemToObject(gtype_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(gtype_prop, "description", cJSON_CreateString("Type filter: file, dir, all")); cJSON_AddItemToObject(gprops, "type", gtype_prop);
+    cJSON_AddItemToObject(gschema, "properties", gprops);
+    cJSON *glob_required = cJSON_CreateArray(); cJSON_AddItemToArray(glob_required, cJSON_CreateString("pattern")); cJSON_AddItemToObject(gschema, "required", glob_required);
+    tool_register(reg, "Glob", "Search for files by glob pattern.", gschema, tool_glob);
 
     // Shell tool
     cJSON *shell_schema = cJSON_CreateObject();
     cJSON_AddItemToObject(shell_schema, "type", cJSON_CreateString("object"));
     cJSON *shell_props = cJSON_CreateObject();
-    cJSON *cmd_prop = cJSON_CreateObject(); 
-    cJSON_AddItemToObject(cmd_prop, "type", cJSON_CreateString("string")); 
-    cJSON_AddItemToObject(cmd_prop, "description", cJSON_CreateString("REQUIRED: Shell command to execute")); 
-    cJSON_AddItemToObject(shell_props, "command", cmd_prop);
-    cJSON *cwd_prop = cJSON_CreateObject(); 
-    cJSON_AddItemToObject(cwd_prop, "type", cJSON_CreateString("string")); 
-    cJSON_AddItemToObject(cwd_prop, "description", cJSON_CreateString("Working directory for the command")); 
-    cJSON_AddItemToObject(shell_props, "cwd", cwd_prop);
-    cJSON *timeout_prop = cJSON_CreateObject(); 
-    cJSON_AddItemToObject(timeout_prop, "type", cJSON_CreateString("integer")); 
-    cJSON_AddItemToObject(timeout_prop, "description", cJSON_CreateString("Timeout in seconds (default: 120, max: 600)")); 
-    cJSON_AddItemToObject(shell_props, "timeout", timeout_prop);
-    cJSON *env_prop = cJSON_CreateObject(); 
-    cJSON_AddItemToObject(env_prop, "type", cJSON_CreateString("object")); 
-    cJSON_AddItemToObject(env_prop, "description", cJSON_CreateString("Environment variables to set (e.g. env={\"GOOS\": \"linux\"})")); 
-    cJSON_AddItemToObject(shell_props, "env", env_prop);
+    cJSON *cmd_prop = cJSON_CreateObject(); cJSON_AddItemToObject(cmd_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(cmd_prop, "description", cJSON_CreateString("Shell command")); cJSON_AddItemToObject(shell_props, "command", cmd_prop);
+    cJSON *cwd_prop = cJSON_CreateObject(); cJSON_AddItemToObject(cwd_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(cwd_prop, "description", cJSON_CreateString("Working directory")); cJSON_AddItemToObject(shell_props, "cwd", cwd_prop);
+    cJSON *timeout_prop = cJSON_CreateObject(); cJSON_AddItemToObject(timeout_prop, "type", cJSON_CreateString("integer")); cJSON_AddItemToObject(timeout_prop, "description", cJSON_CreateString("Timeout in seconds")); cJSON_AddItemToObject(shell_props, "timeout", timeout_prop);
     cJSON_AddItemToObject(shell_schema, "properties", shell_props);
-    cJSON *shell_required = cJSON_CreateArray(); 
-    cJSON_AddItemToArray(shell_required, cJSON_CreateString("command")); 
-    cJSON_AddItemToObject(shell_schema, "required", shell_required);
-    tool_register(reg, "Shell", 
-        "Execute a shell command. Use for package installs, builds, git operations, and any shell task. "
-        "On Windows, uses Git Bash if available, otherwise PowerShell. "
-        "SAFETY: Dangerous patterns (rm -rf /, fork bombs, git reset --hard, docker system prune) are blocked. "
-        "Output is truncated to last 2000 lines or 50KB. "
-        "Use the env parameter to set environment variables. "
-        "IMPORTANT: stdin is disconnected    commands requiring user input (password prompts, y/n) will be killed with stall detection. "
-        "Use non-interactive flags instead (e.g., sudo -S, apt-get -y, echo y | command, --yes).",
-        shell_schema, tool_exec);
+    cJSON *shell_required = cJSON_CreateArray(); cJSON_AddItemToArray(shell_required, cJSON_CreateString("command")); cJSON_AddItemToObject(shell_schema, "required", shell_required);
+    tool_register(reg, "Shell", "Execute a shell command.", shell_schema, tool_exec);
 
     // Calc tool
     cJSON *calc_schema = cJSON_CreateObject();
     cJSON_AddItemToObject(calc_schema, "type", cJSON_CreateString("object"));
     cJSON *calc_props = cJSON_CreateObject();
-    cJSON *calc_expr_prop = cJSON_CreateObject(); cJSON_AddItemToObject(calc_expr_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(calc_expr_prop, "description", cJSON_CreateString("REQUIRED: The mathematical expression to evaluate")); cJSON_AddItemToObject(calc_props, "expr", calc_expr_prop);
+    cJSON *calc_expr_prop = cJSON_CreateObject(); cJSON_AddItemToObject(calc_expr_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(calc_expr_prop, "description", cJSON_CreateString("Math expression")); cJSON_AddItemToObject(calc_props, "expr", calc_expr_prop);
     cJSON_AddItemToObject(calc_schema, "properties", calc_props);
     cJSON *calc_required = cJSON_CreateArray(); cJSON_AddItemToArray(calc_required, cJSON_CreateString("expr")); cJSON_AddItemToObject(calc_schema, "required", calc_required);
-    tool_register(reg, "Calc", "Calculate a mathematical expression and return the result. Supports arithmetic (+, -, *, /, %), power (^), implicit multiplication (2(3), pi(3)), parentheses, variables (pi, e, phi, tau), and functions. Trigonometric functions use RADIANS (sin(pi/2)=1, cos(pi)=-1, sin(0)=0). Supported functions: sqrt, cbrt, pow, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, log (base 2nd arg), ln, log2, log10, exp, abs, sign, floor, ceil, round, min, max, fact (factorial), deg (radians to degrees), rad (degrees to radians). Examples: 2+3*4, sin(pi/2), sqrt(16)+cos(pi), (1+2)^3, log(8,2), pi*2, deg(pi) (returns 180), rad(180) (returns pi)", calc_schema, tool_calc);
+    tool_register(reg, "Calc", "Calculate a mathematical expression.", calc_schema, tool_calc);
 }

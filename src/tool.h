@@ -14,6 +14,7 @@ extern volatile LONG g_tool_timeout;
 extern volatile LONG g_interrupted;
 #else
 extern volatile int g_tool_timeout;
+extern volatile int g_interrupted;
 #endif
 
 #define MAX_TOOLS 128

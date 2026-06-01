@@ -1,13 +1,14 @@
 #ifndef COMPAT_H
 #define COMPAT_H
 
+#ifdef _WIN32
+
 #ifdef _MSC_BUILD
 #include <windows.h>
 #include <process.h>
 
 // MSVC lacks these POSIX headers - provide replacements
 
-// Replace unistd.h functions
 #ifndef __UNISTD_H__
 #define __UNISTD_H__
 #include <io.h>
@@ -33,7 +34,6 @@ static inline int compat_gettimeofday(struct timeval *tv, void *tz) {
 #define gettimeofday compat_gettimeofday
 
 // Replace pthread.h with Windows threads
-// Minimal pthreads replacement using Windows threads
 typedef struct {
     HANDLE handle;
     unsigned id;
@@ -103,7 +103,7 @@ static inline int pthread_cond_init(pthread_cond_t *cond, void *attr) {
 static inline int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
     LeaveCriticalSection(mutex);
     EnterCriticalSection(cond);
-    Sleep(100); // Simple polling implementation
+    Sleep(100);
     LeaveCriticalSection(cond);
     EnterCriticalSection(mutex);
     return 0;
@@ -120,5 +120,12 @@ static inline int pthread_cond_destroy(pthread_cond_t *cond) {
 }
 
 #endif // _MSC_BUILD
+
+#else
+// Linux/macOS: POSIX headers available natively
+#include <unistd.h>
+#include <sys/time.h>
+#include <pthread.h>
+#endif // _WIN32
 
 #endif // COMPAT_H

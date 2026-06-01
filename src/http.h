@@ -1,10 +1,15 @@
 #ifndef HTTP_H
 #define HTTP_H
 
+#include <stdbool.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winhttp.h>
-
-#include <stdbool.h>
+#else
+#include <curl/curl.h>
+#endif
 
 typedef void (*StreamCallback)(const char *chunk, void *userdata);
 

@@ -5,8 +5,14 @@
 #include "tool.h"
 #include "history.h"
 #include "jsonrpc.h"
-#include <windows.h>
 #include <stdbool.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/time.h>
+typedef unsigned long DWORD;
+#endif
 
 #define MAX_MCP_CLIENTS 16
 #define MAX_PENDING_TOOLS 32
@@ -50,7 +56,7 @@ bool repl_is_cancelled(REPL *repl);    // Check if cancelled (like ctx.Done())
 // Returns strdup'd line, or NULL on EOF/interrupt
 char *repl_read_line_interruptible(REPL *repl);
 
-// Ctrl+C handler callback (installed by SetConsoleCtrlHandler)
+// Ctrl+C handler callback
 // This is called from a signal context and must be async-signal-safe.
 void repl_console_ctrl_handler(REPL *repl);
 
