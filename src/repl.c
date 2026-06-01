@@ -59,6 +59,7 @@ static BOOL WINAPI console_ctrl_handler(DWORD ctrl_type) {
         g_repl->cancelled = 1;
 
         extern volatile LONG g_interrupted;
+        extern int g_in_tool;
         g_interrupted = 1;
 
 
@@ -1410,6 +1411,12 @@ int repl_run(REPL *repl) {
             }  // end for i
 
             if (interrupted) break;
+
+            // Check if the user pressed Ctrl+C during tool execution
+            if (repl_is_cancelled(repl)) {
+                interrupted = true;
+                break;
+            }
 
             // Check compaction
             if (history_needs_compact(&repl->history)) {

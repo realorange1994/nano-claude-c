@@ -20,99 +20,55 @@ static int fuzzy_find_text(const char *content, const char *search);
 static char **compute_lcs(const char **a, int a_len, const char **b, int b_len, int *lcs_len);
 static char *generate_unified_diff(const char *filename, const char *old_content, const char *new_content, int context_lines);
 
-// ============== Shell Security: Deny Patterns ==============
-static const char *g_deny_patterns[] = {
-    "\\brm\\s+-[rf]{1,2}\\b",
-    "\\bdel\\s+/[fq]\\b",
-    "\\brmdir\\s+/s\\b",
-    "(?:^|[;&|]\\s*)format\\b",
-    "\\b(mkfs|diskpart)\\b",
-    "\\bdd\\s+.*\\bof=",
-    ">\\s*/dev/sd",
-    "\\b(shutdown|reboot|poweroff)\\b",
-    ":\\(\\)\\s*\\{.*\\};\\s*:",
-    "\\w+\\(\\)\\s*\\{[^}]*\\|\\s*[^}]*&\\s*\\}\\s*;\\s*",
-    "remove-item\\s",
-    "\\bri\\s+",
-    "remove-itemproperty\\s",
-    "rd\\s+/[sS]\\b",
-    "docker\\s+system\\s+prune",
-    "docker\\s+\\S+\\s+prune",
-    "git\\s+push\\s+.*--force",
-    "git\\s+push\\s+-f\\b",
-    "git\\s+clean\\s+-[fd]",
-    "git\\s+reset\\s+--hard",
-    "git\\s+checkout\\s+--force",
-    "git\\s+rebase\\s+--interactive",
-    "git\\s+filter-branch",
-    "git\\s+reflog\\s+expire",
-    "&\\S*&\\S*&",
+// ============== Shell Security: Deny Keywords (simple substring matching) ==============
+static const char *g_deny_keywords[] = {
+    "rm -rf", "rm -fr", "rm -r ", "rm -r/",
+    "rm -f ", "rm -f/",
+    "rmdir /s", "rd /s", "del /s", "del /f", "del /q",
+    "remove-item", "format c:", "format d:", "mkfs", "diskpart",
+    "dd if=", "dd of=", "/dev/sd",
+    "shutdown", "reboot", "poweroff",
+    "docker system prune", "git push --force", "git push -f",
+    "git clean -f", "git reset --hard",
+    "git checkout --force", "git rebase --interactive", "git filter-branch",
+    "git reflog expire",
+    "fork bomb", "(){:", "(){ :",
+    "&&&&&&",
+    "eval", "base64 -d", "printf '\\\\x",
+    NULL
 };
 
-static int pattern_match(const char *pattern, const char *text) {
-    // Simple substring match with word boundaries
-    const char *p = pattern;
-    int in_word = 0;
-    
-    while (*text) {
-        if (*text == '\\') {
-            // Handle word boundary markers
-            if (text[1] == 'b') {
-                // Word boundary
-                int before = in_word;
-                text += 2;
-                // Check what comes before
-                if (before && isalnum((unsigned char)text[0])) {
-                    continue; // Not at word boundary
-                }
-                p = pattern;
-                in_word = 0;
-                continue;
-            }
-        }
-        
-        if (*p == '\\' && p[1]) {
-            p++;
-            if (*p == 'b') {
-                p++;
-                continue;
-            }
-        }
-        
-        if (*p == *text || (*p == '.' && *text)) {
-            p++;
-            if (*p == '\0') return 1;
-        } else {
-            p = pattern;
-            if (*p == *text || (*p == '.' && *text)) {
-                p++;
-            }
-        }
-        text++;
-    }
-    return 0;
-}
-
-// Check if command contains dangerous patterns
+// Check if command contains dangerous patterns using simple substring matching
 static int check_deny_patterns(const char *cmd) {
     if (!cmd) return 0;
-    
-    // Case-insensitive check
+
     char *lower = strdup(cmd);
     if (!lower) return 0;
-    
+
     for (char *p = lower; *p; p++) {
         *p = tolower((unsigned char)*p);
     }
-    
-    for (size_t i = 0; i < sizeof(g_deny_patterns) / sizeof(g_deny_patterns[0]); i++) {
-        const char *pat = g_deny_patterns[i];
-        if (pattern_match(pat, lower)) {
+
+    for (size_t i = 0; g_deny_keywords[i]; i++) {
+        if (strstr(lower, g_deny_keywords[i])) {
             free(lower);
             return 1;
         }
     }
-    
+
+    // Check for variable expansion bypass tricks: r$(echo m) -rf /
+    if (strstr(lower, "$(") && strstr(lower, "rm")) {
+        free(lower);
+        return 1;
+    }
+
+    // Check for encoding bypasses: base64 -d | bash, printf | bash
+    if ((strstr(lower, "base64") && strstr(lower, "|")) ||
+        (strstr(lower, "printf") && strstr(lower, "|") && strstr(lower, "bash"))) {
+        free(lower);
+        return 1;
+    }
+
     free(lower);
     return 0;
 }
@@ -1125,50 +1081,72 @@ char *tool_exec(cJSON *input, char **error) {
     CloseHandle(hWriteOut);  // Close write end in parent (stdout)
     CloseHandle(hWriteErr);  // Close write end in parent (stderr)
 
-    // Read output with stall detection
+    // Read output with stall detection and Ctrl+C interruption
     Buffer buf;
     buffer_init(&buf);
     char chunk[4096];
     DWORD bytes_read;
-    
+
     long long start_time = get_time_ms();
     long long last_activity = start_time;
     int stall_threshold_ms = (timeout_sec * 1000) / 3;
     if (stall_threshold_ms < 10000) stall_threshold_ms = 10000;
-    
+
     int running = 1;
     int stdout_closed = 0;
     int stderr_closed = 0;
-    
+
     while (running) {
         // Check timeout
         long long now = get_time_ms();
         if (now - start_time > timeout_sec * 1000) {
-            // Kill the process
             GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi.dwProcessId);
             Sleep(100);
             TerminateProcess(pi.hProcess, 1);
             buffer_append_str(&buf, "\n[Command timed out]\n");
             break;
         }
-        
-        // Check for output on stdout
+
+        // Check for Ctrl+C interruption (shared flag from console handler)
+        if (g_interrupted) {
+            GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi.dwProcessId);
+            Sleep(100);
+            TerminateProcess(pi.hProcess, 1);
+            buffer_append_str(&buf, "\n[Interrupted]\n");
+            break;
+        }
+
+        // Use PeekNamedPipe to check for data without blocking
+        // This allows us to check g_interrupted between reads
         if (!stdout_closed) {
-            if (ReadFile(hReadOut, chunk, sizeof(chunk) - 1, &bytes_read, NULL) && bytes_read > 0) {
-                chunk[bytes_read] = '\0';
-                buffer_append_str(&buf, chunk);
-                last_activity = get_time_ms();
+            DWORD avail = 0;
+            if (PeekNamedPipe(hReadOut, NULL, 0, NULL, &avail, NULL)) {
+                if (avail > 0) {
+                    if (ReadFile(hReadOut, chunk, sizeof(chunk) - 1, &bytes_read, NULL) && bytes_read > 0) {
+                        chunk[bytes_read] = '\0';
+                        buffer_append_str(&buf, chunk);
+                        last_activity = get_time_ms();
+                    } else {
+                        stdout_closed = 1;
+                    }
+                }
             } else {
                 stdout_closed = 1;
             }
         }
-        
-        // Check for output on stderr
+
         if (!stderr_closed) {
-            if (ReadFile(hReadErr, chunk, sizeof(chunk) - 1, &bytes_read, NULL) && bytes_read > 0) {
-                chunk[bytes_read] = '\0';
-                buffer_append_str(&buf, chunk);
-                last_activity = get_time_ms();
+            DWORD avail = 0;
+            if (PeekNamedPipe(hReadErr, NULL, 0, NULL, &avail, NULL)) {
+                if (avail > 0) {
+                    if (ReadFile(hReadErr, chunk, sizeof(chunk) - 1, &bytes_read, NULL) && bytes_read > 0) {
+                        chunk[bytes_read] = '\0';
+                        buffer_append_str(&buf, chunk);
+                        last_activity = get_time_ms();
+                    } else {
+                        stderr_closed = 1;
+                    }
+                }
             } else {
                 stderr_closed = 1;
             }
@@ -1182,6 +1160,44 @@ char *tool_exec(cJSON *input, char **error) {
                     running = 0;
                     break;
                 }
+            }
+        }
+
+        // Also check process exit if at least one pipe is closed
+        if (running && (stdout_closed || stderr_closed)) {
+            DWORD exitCode;
+            if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != STILL_ACTIVE) {
+                // Process exited, read any remaining data then break
+                Sleep(50);
+                // Drain remaining stdout
+                while (!stdout_closed) {
+                    DWORD avail = 0;
+                    if (PeekNamedPipe(hReadOut, NULL, 0, NULL, &avail, NULL) && avail > 0) {
+                        if (ReadFile(hReadOut, chunk, sizeof(chunk) - 1, &bytes_read, NULL) && bytes_read > 0) {
+                            chunk[bytes_read] = '\0';
+                            buffer_append_str(&buf, chunk);
+                        } else {
+                            stdout_closed = 1;
+                        }
+                    } else {
+                        stdout_closed = 1;
+                    }
+                }
+                // Drain remaining stderr
+                while (!stderr_closed) {
+                    DWORD avail = 0;
+                    if (PeekNamedPipe(hReadErr, NULL, 0, NULL, &avail, NULL) && avail > 0) {
+                        if (ReadFile(hReadErr, chunk, sizeof(chunk) - 1, &bytes_read, NULL) && bytes_read > 0) {
+                            chunk[bytes_read] = '\0';
+                            buffer_append_str(&buf, chunk);
+                        } else {
+                            stderr_closed = 1;
+                        }
+                    } else {
+                        stderr_closed = 1;
+                    }
+                }
+                break;
             }
         }
         

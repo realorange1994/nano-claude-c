@@ -7,7 +7,7 @@
 #include <windows.h>
 
 // Tool registry
-static int g_in_tool = 0;
+int g_in_tool = 0;
 
 // Tool timeout flag (set to 1 to request cancellation)
 volatile LONG g_tool_timeout = 0;

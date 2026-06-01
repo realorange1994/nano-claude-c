@@ -18,6 +18,9 @@ extern volatile int g_tool_timeout;
 
 #define MAX_TOOLS 128
 
+// Global tool execution state (used by Ctrl+C handler)
+extern int g_in_tool;
+
 typedef struct Tool Tool;
 typedef struct ToolRegistry ToolRegistry;
 
