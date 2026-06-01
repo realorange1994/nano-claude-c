@@ -12,6 +12,7 @@
 #include <math.h>
 #include <stdint.h>
 
+static char *clean_utf8(const char *input);
 static char *normalize_line_endings(const char *text);
 static char *restore_line_endings(const char *text, int use_crlf);
 static int fuzzy_find_text(const char *content, const char *search);
@@ -326,6 +327,10 @@ char *tool_read_file(cJSON *input, char **error) {
     out_buf.capacity = 0;
     buffer_free(&out_buf);
 
+    // Clean any invalid UTF-8 bytes to prevent  replacement characters
+    char *dirty = output;
+    output = clean_utf8(dirty);
+    free(dirty);
     return output;
 }
 
@@ -600,6 +605,86 @@ char *tool_edit_file(cJSON *input, char **error) {
         return diff;
     }
     return strdup("File edited successfully");
+}
+
+// Replace invalid UTF-8 byte sequences with '?' to ensure valid output.
+// This prevents Unicode replacement characters () in terminal output.
+static char *clean_utf8(const char *input) {
+    if (!input) return NULL;
+    int len = strlen(input);
+    char *output = malloc(len + 1);  // Worst case: same size
+    if (!output) return strdup(input);
+    int j = 0;
+    int i = 0;
+    while (i < len) {
+        unsigned char c = (unsigned char)input[i];
+        int expected_len = 0;
+        if (c < 0x80) {
+            expected_len = 1;  // ASCII
+        } else if ((c & 0xE0) == 0xC0) {
+            expected_len = 2;  // 110xxxxx
+        } else if ((c & 0xF0) == 0xE0) {
+            expected_len = 3;  // 1110xxxx
+        } else if ((c & 0xF8) == 0xF0) {
+            expected_len = 4;  // 11110xxx
+        } else {
+            // Invalid start byte (0x80-0xBF or 0xF8-0xFF)
+            output[j++] = '?';
+            i++;
+            continue;
+        }
+        // Check if we have enough bytes remaining
+        if (i + expected_len > (size_t)len) {
+            output[j++] = '?';
+            i++;
+            continue;
+        }
+        // Validate continuation bytes
+        int valid = 1;
+        for (int k = 1; k < expected_len; k++) {
+            if (((unsigned char)input[i + k] & 0xC0) != 0x80) {
+                valid = 0;
+                break;
+            }
+        }
+        if (!valid) {
+            output[j++] = '?';
+            i++;
+            continue;
+        }
+        // Check for overlong encoding
+        if (expected_len == 2 && c < 0xC2) {
+            // Overlong 2-byte sequence
+            output[j++] = '?';
+            i++;
+            continue;
+        }
+        if (expected_len == 3 && c == 0xE0 && ((unsigned char)input[i + 1] & 0xE0) == 0x80) {
+            // Overlong 3-byte sequence
+            output[j++] = '?';
+            i++;
+            continue;
+        }
+        if (expected_len == 4 && c == 0xF0 && ((unsigned char)input[i + 1] & 0xF0) == 0x80) {
+            // Overlong 4-byte sequence
+            output[j++] = '?';
+            i++;
+            continue;
+        }
+        // Copy valid sequence
+        for (int k = 0; k < expected_len; k++) {
+            output[j++] = input[i + k];
+        }
+        i += expected_len;
+    }
+    output[j] = '\0';
+    // If output is same size and no changes, free and return original copy
+    if (j == len) {
+        free(output);
+        return strdup(input);
+    }
+    // Otherwise output has replacements
+    return output;
 }
 
 // Normalize line endings to LF only
@@ -1504,7 +1589,7 @@ static char *generate_unified_diff(const char *filename, const char *old_content
         }
         buffer_free(&hunk);
     }
-    
+
     if (lcs) {
         for (int i = 0; i < lcs_len; i++) free(lcs[i]);
         free(lcs);
@@ -1517,8 +1602,11 @@ static char *generate_unified_diff(const char *filename, const char *old_content
         for (int i = 0; i < new_count; i++) free(new_lines[i]);
         free(new_lines);
     }
-    
-    char *result = strdup(buffer_c_str(&buf));
+
+    // Clean any invalid UTF-8 bytes to prevent  replacement characters
+    char *dirty = strdup(buffer_c_str(&buf));
     buffer_free(&buf);
+    char *result = clean_utf8(dirty);
+    free(dirty);
     return result;
 }

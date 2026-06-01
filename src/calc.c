@@ -121,7 +121,7 @@ static Token lexer_next_token(Lexer *lex) {
         char *end;
         tok.number = strtod(lex->expr + lex->pos, &end);
         lex->pos = end - lex->expr;
-        // Handle percentage suffix — only if not a modulo operator.
+        // Handle percentage suffix -- only if not a modulo operator.
         // Distinguish: 50% (percentage) vs 10%3 (modulo) vs 25%+25% (percentage)
         while (lex->pos < lex->len && isspace((unsigned char)lex->expr[lex->pos])) lex->pos++;
         if (lex->pos < lex->len && lex->expr[lex->pos] == '%') {
@@ -136,7 +136,7 @@ static Token lexer_next_token(Lexer *lex) {
                        next == '^' || next == ')' || next == ',') {
                 is_percentage = 1;  // followed by operator
             }
-            // Otherwise it's modulo (digit, '(', letter) — don't consume '%'
+            // Otherwise it's modulo (digit, '(', letter) -- don't consume '%'
 
             if (is_percentage) {
                 lex->pos++;  // consume '%'
