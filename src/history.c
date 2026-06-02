@@ -516,7 +516,6 @@ void history_compact(History *h, char *(*summarize_fn)(const char *)) {
             cJSON *input = cJSON_Parse(e->content);
             if (input) {
                 cJSON *path_item = cJSON_GetObjectItem(input, "file_path");
-                if (!path_item) path_item = cJSON_GetObjectItem(input, "path");
                 if (path_item && path_item->valuestring) {
                     if (strcmp(e->tool_name, "Read") == 0) {
                         if (h->read_files.count < MAX_FILE_PATHS)

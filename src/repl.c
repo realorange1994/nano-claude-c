@@ -435,16 +435,16 @@ static void print_tool_action(const char *name, cJSON *input) {
     if (strcmp(name, "Shell") == 0) {
         printf("Running: %s", cjson_get_str(input, "command"));
     } else if (strcmp(name, "Read") == 0) {
-        const char *path = cjson_get_str(input, "path");
+        const char *path = cjson_get_str(input, "file_path");
         const char *offset = cjson_get_str(input, "offset");
         if (offset && offset[0] && offset[0] != '0')
             printf("Reading: %s (line %s)", path, offset);
         else
             printf("Reading: %s", path);
     } else if (strcmp(name, "Write") == 0) {
-        printf("Writing: %s", cjson_get_str(input, "path"));
+        printf("Writing: %s", cjson_get_str(input, "file_path"));
     } else if (strcmp(name, "Edit") == 0) {
-        printf("Editing: %s", cjson_get_str(input, "path"));
+        printf("Editing: %s", cjson_get_str(input, "file_path"));
     } else if (strcmp(name, "Grep") == 0) {
         const char *pattern = cjson_get_str(input, "pattern");
         const char *path = cjson_get_str(input, "path");
