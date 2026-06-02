@@ -49,8 +49,10 @@ ProviderType provider_type(Provider *p) {
     return p->type;
 }
 
-char *provider_chat_sync(Provider *p, cJSON *messages) {
+char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override) {
     if (!p || !messages) return NULL;
+
+    int max_tokens = max_tokens_override > 0 ? max_tokens_override : p->max_tokens;
     
     char *json_body = NULL;
     char headers[1024];
@@ -61,7 +63,7 @@ char *provider_chat_sync(Provider *p, cJSON *messages) {
         cJSON *body = cJSON_CreateObject();
         cJSON_AddItemToObject(body, "model", cJSON_CreateString(p->model));
         cJSON_AddItemToObject(body, "messages", cJSON_Duplicate(messages, 1));
-        cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(p->max_tokens));
+        cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(max_tokens));
         cJSON_AddItemToObject(body, "stream", cJSON_CreateBool(false));
         
         json_body = cJSON_Print(body);
@@ -83,7 +85,7 @@ char *provider_chat_sync(Provider *p, cJSON *messages) {
         cJSON *body = cJSON_CreateObject();
         cJSON_AddItemToObject(body, "model", cJSON_CreateString(p->model));
         cJSON_AddItemToObject(body, "messages", cJSON_Duplicate(messages, 1));
-        cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(p->max_tokens));
+        cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(max_tokens));
         cJSON_AddItemToObject(body, "stream", cJSON_CreateBool(false));
         
         json_body = cJSON_Print(body);
@@ -456,22 +458,22 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
         cJSON_AddItemToObject(body, "messages", cJSON_Duplicate(messages, 1));
         cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(p->max_tokens));
         cJSON_AddItemToObject(body, "stream", cJSON_CreateBool(true));
-        
+
         json_body = cJSON_Print(body);
         cJSON_Delete(body);
-        
+
         snprintf(headers, sizeof(headers),
             "Content-Type: application/json\n"
             "Authorization: Bearer %s\n",
             p->api_key);
-        
+
         if (p->base_url) {
             snprintf(url, sizeof(url), "%s/v1/chat/completions", p->base_url);
         } else {
             snprintf(url, sizeof(url), "https://api.openai.com/v1/chat/completions");
         }
     }
-    
+
     if (!json_body) return false;
     
     StreamContext ctx;

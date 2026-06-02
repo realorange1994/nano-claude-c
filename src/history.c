@@ -258,6 +258,19 @@ cJSON *history_to_messages(History *h) {
         cJSON_AddItemToArray(msgs, msg);
     }
 
+    // Collect valid tool_use_ids from remaining tool calls (for orphan detection)
+    int valid_tool_count = 0;
+    char valid_tool_ids[2048][64];
+    for (int i = 0; i < h->count && valid_tool_count < 2048; i++) {
+        Entry *e = &h->entries[i];
+        if (e->type == ENTRY_MESSAGE && e->role == ROLE_ASSISTANT && e->tool_name) {
+            const char *tid = e->parent_id[0] ? e->parent_id : e->id;
+            strncpy(valid_tool_ids[valid_tool_count], tid, 63);
+            valid_tool_ids[valid_tool_count][63] = '\0';
+            valid_tool_count++;
+        }
+    }
+
     int i = 0;
     while (i < h->count) {
         Entry *e = &h->entries[i];
@@ -278,18 +291,41 @@ cJSON *history_to_messages(History *h) {
             while (i < h->count && h->entries[i].type == ENTRY_TOOL_RESULT) {
                 Entry *te = &h->entries[i];
                 if (te->tool_result) {
+                    // Validate tool_use_id - skip orphaned results whose tool call was removed
+                    const char *tid = te->parent_id[0] ? te->parent_id : NULL;
+                    int is_valid = 0;
+                    if (tid && tid[0]) {
+                        for (int v = 0; v < valid_tool_count; v++) {
+                            if (strcmp(tid, valid_tool_ids[v]) == 0) {
+                                is_valid = 1;
+                                break;
+                            }
+                        }
+                    }
+                    if (!is_valid) {
+                        // Orphaned tool result - skip silently
+                        i++;
+                        continue;
+                    }
+
                     cJSON *tool_result_block = cJSON_CreateObject();
                     cJSON_AddItemToObject(tool_result_block, "type", cJSON_CreateString("tool_result"));
                     cJSON_AddItemToObject(tool_result_block, "tool_use_id",
-                        cJSON_CreateString(te->parent_id[0] ? te->parent_id : ""));
+                        cJSON_CreateString(tid));
                     cJSON_AddItemToObject(tool_result_block, "content",
                         cJSON_CreateString(te->tool_result));
                     cJSON_AddItemToArray(content_arr, tool_result_block);
                 }
                 i++;
             }
-            cJSON_AddItemToObject(msg, "content", content_arr);
-            cJSON_AddItemToArray(msgs, msg);
+            // Only add user message if it has content blocks
+            if (cJSON_GetArraySize(content_arr) > 0) {
+                cJSON_AddItemToObject(msg, "content", content_arr);
+                cJSON_AddItemToArray(msgs, msg);
+            } else {
+                cJSON_Delete(content_arr);
+                cJSON_Delete(msg);
+            }
         } else if (e->role == ROLE_ASSISTANT) {
             // Assistant message - group consecutive assistant entries (text + tool_use)
             // into one assistant message with content blocks

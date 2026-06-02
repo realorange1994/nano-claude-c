@@ -918,6 +918,30 @@ char *tool_glob(cJSON *input, char **error) {
     return output ? output : strdup("");
 }
 
+// ============== Shell command escaping for bash -c ==============
+static char *escape_bash_command(const char *cmd) {
+    if (!cmd) return strdup("");
+    // Count escape characters needed
+    int extra = 0;
+    for (const char *p = cmd; *p; p++) {
+        if (*p == '\\' || *p == '"' || *p == '`' || *p == '$') extra++;
+    }
+    if (extra == 0) return strdup(cmd);
+
+    char *escaped = malloc(strlen(cmd) + extra + 1);
+    if (!escaped) return strdup(cmd);
+
+    int j = 0;
+    for (const char *p = cmd; *p; p++) {
+        if (*p == '\\' || *p == '"' || *p == '`' || *p == '$') {
+            escaped[j++] = '\\';
+        }
+        escaped[j++] = *p;
+    }
+    escaped[j] = '\0';
+    return escaped;
+}
+
 // ============== Shell tool ==============
 char *tool_exec(cJSON *input, char **error) {
     cJSON *cmd = cJSON_GetObjectItem(input, "command");
@@ -955,19 +979,24 @@ char *tool_exec(cJSON *input, char **error) {
     }
     if (!bash_exe) { *error = strdup("bash not found"); CloseHandle(hReadOut); CloseHandle(hWriteOut); CloseHandle(hReadErr); CloseHandle(hWriteErr); return NULL; }
 
+    // Escape command for safe embedding in bash -c "..."
+    char *escaped_cmd = escape_bash_command(command);
+
     char cmd_line[16384];
     if (work_dir) {
+        // Convert Windows path like E:\workspace to /e/workspace
         char posix_dir[512]; int pi = 0;
         for (int ci = 0; work_dir[ci] && pi < (int)(sizeof(posix_dir)-1); ci++) {
             if (work_dir[ci] == '\\') posix_dir[pi++] = '/';
-            else if (work_dir[ci] == ':') { posix_dir[pi++] = '/'; posix_dir[pi++] = tolower(work_dir[++ci]); }
-            else posix_dir[pi++] = tolower(work_dir[ci]);
+            else if (work_dir[ci] == ':') posix_dir[pi++] = '/';
+            else posix_dir[pi++] = tolower((unsigned char)work_dir[ci]);
         }
         posix_dir[pi] = '\0';
-        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c \"cd %s && %s\"", bash_exe, posix_dir, command);
+        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c \"cd %s && %s\"", bash_exe, posix_dir, escaped_cmd);
     } else {
-        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c \"%s\"", bash_exe, command);
+        snprintf(cmd_line, sizeof(cmd_line), "\"%s\" -c \"%s\"", bash_exe, escaped_cmd);
     }
+    free(escaped_cmd);
 
     PROCESS_INFORMATION pi = {0};
     STARTUPINFOW siw = {0};

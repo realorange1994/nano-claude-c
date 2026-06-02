@@ -39,7 +39,8 @@ typedef void (*ChunkCallback)(const StreamChunk *chunk, void *userdata);
 bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, void *userdata, ToolRegistry *tools, const volatile long *cancelled);
 
 // Synchronous chat (for compact summary)
-char *provider_chat_sync(Provider *p, cJSON *messages);
+// max_tokens_override: if > 0, use this instead of provider's default max_tokens
+char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override);
 
 void provider_set_max_tokens(Provider *p, int max_tokens);
 const char *provider_model(Provider *p);

@@ -197,6 +197,19 @@ char *repl_read_line_interruptible(REPL *repl) {
     int pos = 0;
     char ch;
 
+    // Check if stdin is a pipe (not a console)
+    DWORD file_type = GetFileType(hStdin);
+    int is_pipe = (file_type == FILE_TYPE_CHAR) ? 0 : 1;
+    if (is_pipe) {
+        // Use fgets for piped/non-console input
+        static char pipe_line[4096];
+        if (fgets(pipe_line, sizeof(pipe_line), stdin) == NULL) return NULL;
+        size_t len = strlen(pipe_line);
+        if (len > 0 && pipe_line[len - 1] == '\n') pipe_line[--len] = '\0';
+        if (len > 0 && pipe_line[len - 1] == '\r') pipe_line[--len] = '\0';
+        return strdup(pipe_line);
+    }
+
     // Restore console mode before reading
     ensure_console_input_mode();
 
@@ -403,7 +416,7 @@ static char *repl_summarize_callback(const char *history_text) {
     cJSON_AddItemToArray(messages, msg);
     free(prompt);
 
-    char *summary = provider_chat_sync(g_repl->provider, messages);
+    char *summary = provider_chat_sync(g_repl->provider, messages, 8192);
     cJSON_Delete(messages);
     return summary;
 }
