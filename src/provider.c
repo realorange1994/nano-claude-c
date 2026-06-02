@@ -7,6 +7,42 @@
 #include <string.h>
 #include <stdio.h>
 
+// ============================================================================
+// URL construction helpers
+// ============================================================================
+
+// Build full URL: append /v1/messages or /v1/chat/completions to base_url,
+// avoiding duplicate /v1 if base_url already ends with the suffix.
+static void build_anthropic_url(char *url, size_t url_size, const char *base_url) {
+    if (!base_url) {
+        snprintf(url, url_size, "https://api.anthropic.com/v1/messages");
+        return;
+    }
+    size_t len = strlen(base_url);
+    if (strstr(base_url, "/v1/messages")) {
+        snprintf(url, url_size, "%s", base_url);
+    } else if (len >= 3 && strcmp(base_url + len - 3, "/v1") == 0) {
+        snprintf(url, url_size, "%s/messages", base_url);
+    } else {
+        snprintf(url, url_size, "%s/v1/messages", base_url);
+    }
+}
+
+static void build_openai_url(char *url, size_t url_size, const char *base_url) {
+    if (!base_url) {
+        snprintf(url, url_size, "https://api.openai.com/v1/chat/completions");
+        return;
+    }
+    size_t len = strlen(base_url);
+    if (strstr(base_url, "/v1/chat/completions")) {
+        snprintf(url, url_size, "%s", base_url);
+    } else if (len >= 3 && strcmp(base_url + len - 3, "/v1") == 0) {
+        snprintf(url, url_size, "%s/chat/completions", base_url);
+    } else {
+        snprintf(url, url_size, "%s/v1/chat/completions", base_url);
+    }
+}
+
 struct Provider {
     ProviderType type;
     char *api_key;
@@ -51,8 +87,202 @@ ProviderType provider_type(Provider *p) {
 }
 
 // ============================================================================
-// Helper: prepend system prompt as system role message (for OpenAI format)
+// Message format conversion: Anthropic-style -> OpenAI-style
+// history_to_messages() produces Anthropic format (tool_use/tool_result content blocks).
+// OpenAI API needs: role=assistant+tool_calls array, role=tool for results.
 // ============================================================================
+
+static cJSON *convert_to_openai_messages(cJSON *anthropic_msgs) {
+    if (!anthropic_msgs) return NULL;
+
+    cJSON *openai_msgs = cJSON_CreateArray();
+    int msg_count = cJSON_GetArraySize(anthropic_msgs);
+
+    for (int mi = 0; mi < msg_count; mi++) {
+        cJSON *msg = cJSON_GetArrayItem(anthropic_msgs, mi);
+        if (!msg) continue;
+
+        cJSON *role_item = cJSON_GetObjectItem(msg, "role");
+        if (!role_item || !role_item->valuestring) continue;
+        const char *role = role_item->valuestring;
+
+        cJSON *content = cJSON_GetObjectItem(msg, "content");
+
+        if (strcmp(role, "assistant") == 0) {
+            // Check if content is an array (Anthropic content blocks)
+            if (content && content->type == cJSON_Array) {
+                // Extract text and tool_calls separately
+                cJSON *oai_msg = cJSON_CreateObject();
+                cJSON_AddItemToObject(oai_msg, "role", cJSON_CreateString("assistant"));
+
+                cJSON *tool_calls = cJSON_CreateArray();
+                Buffer text_buf;
+                buffer_init(&text_buf);
+
+                int block_count = cJSON_GetArraySize(content);
+                for (int bi = 0; bi < block_count; bi++) {
+                    cJSON *block = cJSON_GetArrayItem(content, bi);
+                    if (!block) continue;
+                    cJSON *btype = cJSON_GetObjectItem(block, "type");
+                    if (!btype || !btype->valuestring) continue;
+
+                    if (strcmp(btype->valuestring, "text") == 0) {
+                        cJSON *text = cJSON_GetObjectItem(block, "text");
+                        if (text && text->valuestring) {
+                            buffer_append_str(&text_buf, text->valuestring);
+                        }
+                    } else if (strcmp(btype->valuestring, "tool_use") == 0) {
+                        // Convert to OpenAI tool_call format
+                        cJSON *tc = cJSON_CreateObject();
+                        cJSON *id = cJSON_GetObjectItem(block, "id");
+                        cJSON *name = cJSON_GetObjectItem(block, "name");
+                        cJSON *input = cJSON_GetObjectItem(block, "input");
+
+                        cJSON_AddItemToObject(tc, "id",
+                            id ? cJSON_CreateString(id->valuestring) : cJSON_CreateString(""));
+                        cJSON_AddItemToObject(tc, "type", cJSON_CreateString("function"));
+                        cJSON_AddItemToObject(tc, "index", cJSON_CreateNumber(tool_calls->child ? cJSON_GetArraySize(tool_calls) : 0));
+
+                        cJSON *fn = cJSON_CreateObject();
+                        cJSON_AddItemToObject(fn, "name",
+                            name ? cJSON_CreateString(name->valuestring) : cJSON_CreateString(""));
+                        char *arg_str = input ? cJSON_PrintUnformatted(input) : strdup("{}");
+                        cJSON_AddItemToObject(fn, "arguments", cJSON_CreateString(arg_str));
+                        free(arg_str);
+                        cJSON_AddItemToObject(tc, "function", fn);
+                        cJSON_AddItemToArray(tool_calls, tc);
+                    }
+                }
+
+                if (text_buf.len > 0) {
+                    cJSON_AddItemToObject(oai_msg, "content", cJSON_CreateString(buffer_c_str(&text_buf)));
+                } else {
+                    cJSON_AddNullToObject(oai_msg, "content");
+                }
+                buffer_free(&text_buf);
+
+                if (cJSON_GetArraySize(tool_calls) > 0) {
+                    cJSON_AddItemToObject(oai_msg, "tool_calls", tool_calls);
+                } else {
+                    cJSON_Delete(tool_calls);
+                }
+
+                cJSON_AddItemToArray(openai_msgs, oai_msg);
+            } else if (content && content->valuestring) {
+                // Simple string content
+                cJSON *oai_msg = cJSON_CreateObject();
+                cJSON_AddItemToObject(oai_msg, "role", cJSON_CreateString("assistant"));
+                cJSON_AddItemToObject(oai_msg, "content", cJSON_CreateString(content->valuestring));
+                cJSON_AddItemToArray(openai_msgs, oai_msg);
+            } else {
+                // No content
+                cJSON *oai_msg = cJSON_CreateObject();
+                cJSON_AddItemToObject(oai_msg, "role", cJSON_CreateString("assistant"));
+                cJSON_AddNullToObject(oai_msg, "content");
+                cJSON_AddItemToArray(openai_msgs, oai_msg);
+            }
+        } else if (strcmp(role, "user") == 0) {
+            if (content && content->type == cJSON_Array) {
+                // Check for tool_result blocks -> split into separate role=tool messages
+                int has_tool_result = 0;
+                int block_count = cJSON_GetArraySize(content);
+                for (int bi = 0; bi < block_count; bi++) {
+                    cJSON *block = cJSON_GetArrayItem(content, bi);
+                    if (block) {
+                        cJSON *btype = cJSON_GetObjectItem(block, "type");
+                        if (btype && btype->valuestring && strcmp(btype->valuestring, "tool_result") == 0) {
+                            has_tool_result = 1;
+                            break;
+                        }
+                    }
+                }
+
+                if (has_tool_result) {
+                    // Split: text blocks become user messages, tool_result blocks become tool messages
+                    int block_count = cJSON_GetArraySize(content);
+                    for (int bi = 0; bi < block_count; bi++) {
+                        cJSON *block = cJSON_GetArrayItem(content, bi);
+                        if (!block) continue;
+                        cJSON *btype = cJSON_GetObjectItem(block, "type");
+                        if (!btype || !btype->valuestring) continue;
+
+                        if (strcmp(btype->valuestring, "tool_result") == 0) {
+                            cJSON *oai_tool = cJSON_CreateObject();
+                            cJSON_AddItemToObject(oai_tool, "role", cJSON_CreateString("tool"));
+                            cJSON *tool_use_id = cJSON_GetObjectItem(block, "tool_use_id");
+                            cJSON_AddItemToObject(oai_tool, "tool_call_id",
+                                tool_use_id ? cJSON_CreateString(tool_use_id->valuestring) : cJSON_CreateString(""));
+                            cJSON *tool_content = cJSON_GetObjectItem(block, "content");
+                            cJSON_AddItemToObject(oai_tool, "content",
+                                tool_content ? cJSON_CreateString(tool_content->valuestring) : cJSON_CreateString(""));
+                            cJSON_AddItemToArray(openai_msgs, oai_tool);
+                        } else if (strcmp(btype->valuestring, "text") == 0) {
+                            cJSON *text = cJSON_GetObjectItem(block, "text");
+                            if (text && text->valuestring) {
+                                cJSON *oai_user = cJSON_CreateObject();
+                                cJSON_AddItemToObject(oai_user, "role", cJSON_CreateString("user"));
+                                cJSON_AddItemToObject(oai_user, "content", cJSON_CreateString(text->valuestring));
+                                cJSON_AddItemToArray(openai_msgs, oai_user);
+                            }
+                        } else {
+                            // Other block types (image, etc.) - skip for now
+                        }
+                    }
+                } else {
+                    // No tool_result blocks: keep as-is or flatten text blocks
+                    // Check if all blocks are text -> flatten to single string
+                    int all_text = 1;
+                    Buffer text_buf;
+                    buffer_init(&text_buf);
+                    int block_count = cJSON_GetArraySize(content);
+                    for (int bi = 0; bi < block_count; bi++) {
+                        cJSON *block = cJSON_GetArrayItem(content, bi);
+                        if (!block) { all_text = 0; break; }
+                        cJSON *btype = cJSON_GetObjectItem(block, "type");
+                        if (btype && btype->valuestring && strcmp(btype->valuestring, "text") == 0) {
+                            cJSON *text = cJSON_GetObjectItem(block, "text");
+                            if (text && text->valuestring) {
+                                buffer_append_str(&text_buf, text->valuestring);
+                            }
+                        } else {
+                            all_text = 0;
+                            break;
+                        }
+                    }
+                    if (all_text && text_buf.len > 0) {
+                        cJSON *oai_msg = cJSON_CreateObject();
+                        cJSON_AddItemToObject(oai_msg, "role", cJSON_CreateString("user"));
+                        cJSON_AddItemToObject(oai_msg, "content", cJSON_CreateString(buffer_c_str(&text_buf)));
+                        cJSON_AddItemToArray(openai_msgs, oai_msg);
+                    } else {
+                        // Keep original content array
+                        cJSON *oai_msg = cJSON_CreateObject();
+                        cJSON_AddItemToObject(oai_msg, "role", cJSON_CreateString("user"));
+                        cJSON_AddItemToObject(oai_msg, "content", cJSON_Duplicate(content, 1));
+                        cJSON_AddItemToArray(openai_msgs, oai_msg);
+                    }
+                    buffer_free(&text_buf);
+                }
+            } else if (content && content->valuestring) {
+                // Simple string user message
+                cJSON *oai_msg = cJSON_CreateObject();
+                cJSON_AddItemToObject(oai_msg, "role", cJSON_CreateString("user"));
+                cJSON_AddItemToObject(oai_msg, "content", cJSON_CreateString(content->valuestring));
+                cJSON_AddItemToArray(openai_msgs, oai_msg);
+            } else {
+                cJSON *oai_msg = cJSON_CreateObject();
+                cJSON_AddItemToObject(oai_msg, "role", cJSON_CreateString("user"));
+                cJSON_AddItemToObject(oai_msg, "content", cJSON_CreateString(""));
+                cJSON_AddItemToArray(openai_msgs, oai_msg);
+            }
+        } else {
+            // system or other: pass through
+            cJSON_AddItemToArray(openai_msgs, cJSON_Duplicate(msg, 1));
+        }
+    }
+
+    return openai_msgs;
+}
 
 static cJSON *prepend_system_message(cJSON *messages, const char *system_prompt) {
     if (!system_prompt || !system_prompt[0]) return messages;
@@ -136,36 +366,30 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
             "anthropic-version: 2023-06-01\n",
             p->api_key);
 
-        if (p->base_url) {
-            snprintf(url, sizeof(url), "%s/v1/messages", p->base_url);
-        } else {
-            snprintf(url, sizeof(url), "https://api.anthropic.com/v1/messages");
-        }
+        build_anthropic_url(url, sizeof(url), p->base_url);
     } else {
-        // OpenAI format
-        cJSON *msgs = cJSON_Duplicate(messages, 1);
+        // OpenAI format: convert Anthropic-style messages to OpenAI format
+        cJSON *oai_msgs = convert_to_openai_messages(messages);
+        if (!oai_msgs) return NULL;
         if (system_prompt && system_prompt[0]) {
-            msgs = prepend_system_message(msgs, system_prompt);
+            prepend_system_message(oai_msgs, system_prompt);
         }
 
         cJSON *body = cJSON_CreateObject();
         cJSON_AddItemToObject(body, "model", cJSON_CreateString(p->model));
-        cJSON_AddItemToObject(body, "messages", msgs);
+        cJSON_AddItemToObject(body, "messages", oai_msgs);
         cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(max_tokens));
 
         json_body = cJSON_Print(body);
         cJSON_Delete(body);
+        // oai_msgs already freed by cJSON_Delete(body)
 
         snprintf(headers, sizeof(headers),
             "Content-Type: application/json\n"
             "Authorization: Bearer %s\n",
             p->api_key);
 
-        if (p->base_url) {
-            snprintf(url, sizeof(url), "%s/v1/chat/completions", p->base_url);
-        } else {
-            snprintf(url, sizeof(url), "https://api.openai.com/v1/chat/completions");
-        }
+        build_openai_url(url, sizeof(url), p->base_url);
     }
 
     if (!json_body) return NULL;
@@ -623,21 +847,18 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
             "anthropic-version: 2023-06-01\n",
             p->api_key);
 
-        if (p->base_url) {
-            snprintf(url, sizeof(url), "%s/v1/messages", p->base_url);
-        } else {
-            snprintf(url, sizeof(url), "https://api.anthropic.com/v1/messages");
-        }
+        build_anthropic_url(url, sizeof(url), p->base_url);
     } else {
-        // OpenAI format
-        cJSON *msgs = cJSON_Duplicate(messages, 1);
+        // OpenAI format: convert Anthropic-style messages to OpenAI format
+        cJSON *oai_msgs = convert_to_openai_messages(messages);
+        if (!oai_msgs) { free(json_body); return false; }
         if (system_prompt && system_prompt[0]) {
-            msgs = prepend_system_message(msgs, system_prompt);
+            prepend_system_message(oai_msgs, system_prompt);
         }
 
         cJSON *body = cJSON_CreateObject();
         cJSON_AddItemToObject(body, "model", cJSON_CreateString(p->model));
-        cJSON_AddItemToObject(body, "messages", msgs);
+        cJSON_AddItemToObject(body, "messages", oai_msgs);
         cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(p->max_tokens));
         cJSON_AddItemToObject(body, "stream", cJSON_CreateBool(true));
 
@@ -652,17 +873,14 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
 
         json_body = cJSON_Print(body);
         cJSON_Delete(body);
+        // oai_msgs already freed by cJSON_Delete(body)
 
         snprintf(headers, sizeof(headers),
             "Content-Type: application/json\n"
             "Authorization: Bearer %s\n",
             p->api_key);
 
-        if (p->base_url) {
-            snprintf(url, sizeof(url), "%s/v1/chat/completions", p->base_url);
-        } else {
-            snprintf(url, sizeof(url), "https://api.openai.com/v1/chat/completions");
-        }
+        build_openai_url(url, sizeof(url), p->base_url);
     }
 
     if (!json_body) return false;
