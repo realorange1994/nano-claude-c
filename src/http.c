@@ -26,10 +26,10 @@ void http_cleanup(void) {
 }
 
 #ifdef _WIN32
-// --- Windows: WinHTTP implementation -------------------------------------------------------
+// --- Windows: WinHTTP -------------------------------------------------------
 
 #else
-// --- Linux/macOS: libcurl helpers -----------------------------------------------------------
+// --- Linux/macOS: libcurl helpers -------------------------------------------
 
 typedef struct {
     char *data;
@@ -89,7 +89,6 @@ static void sse_ctx_init(SSECtx *ctx, StreamCallback cb, void *userdata,
 
 static void sse_flush(SSECtx *ctx) {
     if (ctx->buf && ctx->buf_len > 0) {
-        // dispatch only data: lines
         char *ptr = ctx->buf;
         char *eol;
         while ((eol = strchr(ptr, '\n')) != NULL) {
@@ -104,7 +103,6 @@ static void sse_flush(SSECtx *ctx) {
             }
             ptr = eol + 1;
         }
-        // shift remainder
         size_t rem = ctx->buf_len - (size_t)(ptr - ctx->buf);
         if (rem > 0) memmove(ctx->buf, ptr, rem);
         ctx->buf_len = rem;
@@ -138,7 +136,6 @@ static size_t curl_sse_write_cb(void *ptr, size_t size, size_t nmemb, void *user
 
 static void sse_ctx_free(SSECtx *ctx) {
     if (ctx->buf && ctx->buf_len > 0) {
-        // final flush -- dispatch any remaining data: line
         if (strncmp(ctx->buf, "data: ", 6) == 0) {
             ctx->cb(ctx->buf + 6, ctx->userdata);
         }
@@ -189,10 +186,15 @@ static void parse_url(const char *url, char *scheme, char *host, int *port, char
 }
 #endif // _WIN32
 
-// --- http_post -----------------------------------------------------------------------------
+// --- http_post_ex ----------------------------------------------------------------------------
 
-char *http_post(const char *url, const char *headers_str, const char *body, int timeout_ms) {
-    if (!url || !body) return NULL;
+HttpResponse http_post_ex(const char *url, const char *headers_str, const char *body, int timeout_ms) {
+    HttpResponse result = {NULL, 0, {0}};
+
+    if (!url || !body) {
+        strncpy(result.error, "NULL url or body", sizeof(result.error) - 1);
+        return result;
+    }
 
 #ifdef _WIN32
     char scheme[16] = {0};
@@ -200,11 +202,10 @@ char *http_post(const char *url, const char *headers_str, const char *body, int 
     int port = 443;
     char path[1024] = {0};
 
-    // Parse URL: scheme://host[:port]/path
     const char *slash_slash = strstr(url, "://");
     if (!slash_slash) {
-        DEBUG_LOG("[DEBUG][http_post] Invalid URL (no ://): %s\n", url);
-        return NULL;
+        strncpy(result.error, "Invalid URL (no ://)", sizeof(result.error) - 1);
+        return result;
     }
 
     size_t scheme_len = (size_t)(slash_slash - url);
@@ -215,7 +216,6 @@ char *http_post(const char *url, const char *headers_str, const char *body, int 
     const char *host_start = slash_slash + 3;
     const char *path_start = strchr(host_start, '/');
     const char *colon = strchr(host_start, ':');
-
     int use_ssl = (strcmp(scheme, "https") == 0) ? 1 : 0;
 
     if (path_start) {
@@ -242,27 +242,27 @@ char *http_post(const char *url, const char *headers_str, const char *body, int 
         host[host_len] = '\0';
         strcpy(path, "/");
     }
-
     if (port == 0) port = use_ssl ? 443 : 80;
-
-    DEBUG_LOG("[DEBUG][http_post] Connecting to %s:%d%s (%s)\n", host, port, path, scheme);
 
     wchar_t *w_host = utf8_to_wide(host);
     wchar_t *w_path = utf8_to_wide(path);
 
     HINTERNET hSession = WinHttpOpen(L"NanoClaude/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!hSession) { free(w_host); free(w_path); return NULL; }
+    if (!hSession) { free(w_host); free(w_path);
+        strncpy(result.error, "WinHttpOpen failed", sizeof(result.error) - 1); return result; }
 
     WinHttpSetTimeouts(hSession, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
 
     HINTERNET hConnect = WinHttpConnect(hSession, w_host, (INTERNET_PORT)port, 0);
     free(w_host);
-    if (!hConnect) { WinHttpCloseHandle(hSession); free(w_path); return NULL; }
+    if (!hConnect) { WinHttpCloseHandle(hSession); free(w_path);
+        strncpy(result.error, "WinHttpConnect failed", sizeof(result.error) - 1); return result; }
 
     DWORD flags = use_ssl ? WINHTTP_FLAG_SECURE : 0;
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", w_path, NULL, NULL, NULL, flags);
     free(w_path);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return NULL; }
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+        strncpy(result.error, "WinHttpOpenRequest failed", sizeof(result.error) - 1); return result; }
 
     if (headers_str) {
         wchar_t *w_headers = utf8_to_wide(headers_str);
@@ -271,37 +271,30 @@ char *http_post(const char *url, const char *headers_str, const char *body, int 
             free(w_headers);
         }
     }
-
     if (use_ssl) {
         DWORD opts = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
         WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
     }
 
-    BOOL result = WinHttpSendRequest(hRequest, NULL, 0, (LPVOID)body, (DWORD)strlen(body), (DWORD)strlen(body), 0);
-    if (!result) {
+    BOOL sent = WinHttpSendRequest(hRequest, NULL, 0, (LPVOID)body, (DWORD)strlen(body), (DWORD)strlen(body), 0);
+    if (!sent) {
+        DWORD err = GetLastError();
+        snprintf(result.error, sizeof(result.error), "WinHttpSendRequest failed (0x%08lX)", err);
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
-        return NULL;
+        return result;
     }
-
-    WinHttpReceiveResponse(hRequest, NULL);
+    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+        DWORD err = GetLastError();
+        snprintf(result.error, sizeof(result.error), "WinHttpReceiveResponse failed (0x%08lX)", err);
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+        return result;
+    }
 
     DWORD status_code = 0;
-    DWORD size = sizeof(status_code);
+    DWORD qsize = sizeof(status_code);
     WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                        NULL, &status_code, &size, NULL);
-
-    if (status_code != 200) {
-        Buffer buf; buffer_init(&buf);
-        char chunk[4096]; DWORD bytes_read;
-        while (WinHttpReadData(hRequest, chunk, sizeof(chunk) - 1, &bytes_read) && bytes_read > 0) {
-            chunk[bytes_read] = '\0';
-            buffer_append(&buf, chunk, bytes_read);
-        }
-        DEBUG_LOG("[DEBUG][http_post] Error response: %s\n", buffer_c_str(&buf));
-        buffer_free(&buf);
-        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
-        return NULL;
-    }
+                        NULL, &status_code, &qsize, NULL);
+    result.http_status = (int)status_code;
 
     Buffer buf; buffer_init(&buf);
     char chunk[4096]; DWORD bytes_read;
@@ -311,41 +304,42 @@ char *http_post(const char *url, const char *headers_str, const char *body, int 
     }
     WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
 
-    char *response = buffer_steal(&buf);
-    if (!response) response = strdup("");
+    if (status_code != 200) {
+        if (buffer_c_str(&buf) && buffer_c_str(&buf)[0])
+            strncpy(result.error, buffer_c_str(&buf), sizeof(result.error) - 1);
+        else
+            snprintf(result.error, sizeof(result.error), "HTTP %d", status_code);
+        buffer_free(&buf);
+        return result;
+    }
+
+    result.body = buffer_steal(&buf);
+    if (!result.body) result.body = strdup("");
     buffer_free(&buf);
-    return response;
+    return result;
 
 #else
-    // Linux/macOS: libcurl
-    char scheme[16] = {0};
-    char host[256] = {0};
+    char scheme[16] = {0}, host[256] = {0}, path[1024] = {0};
     int port = 443;
-    char path[1024] = {0};
     parse_url(url, scheme, host, &port, path);
 
     char full_url[2048];
     snprintf(full_url, sizeof(full_url), "%s://%s:%d%s", scheme, host, port, path);
 
     CURL *curl = curl_easy_init();
-    if (!curl) return NULL;
+    if (!curl) { strncpy(result.error, "curl_easy_init failed", sizeof(result.error) - 1); return result; }
 
     struct curl_slist *hdrs = NULL;
     if (headers_str) {
-        // headers_str is multiline, split by \n
         char tmp[4096];
         strncpy(tmp, headers_str, sizeof(tmp) - 1);
         tmp[sizeof(tmp) - 1] = '\0';
         char *save = NULL;
         char *line = strtok_r(tmp, "\n", &save);
-        while (line) {
-            if (*line) hdrs = curl_slist_append(hdrs, line);
-            line = strtok_r(NULL, "\n", &save);
-        }
+        while (line) { if (*line) hdrs = curl_slist_append(hdrs, line); line = strtok_r(NULL, "\n", &save); }
     }
 
-    MemBuf resp;
-    mb_init(&resp);
+    MemBuf resp; mb_init(&resp);
 
     curl_easy_setopt(curl, CURLOPT_URL, full_url);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -362,37 +356,50 @@ char *http_post(const char *url, const char *headers_str, const char *body, int 
     long http_code = 0;
     CURLcode res = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    result.http_status = (int)http_code;
 
     curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK || http_code != 200) {
-        if (res != CURLE_OK)
-            DEBUG_LOG("[DEBUG][http_post] curl error: %s\n", curl_easy_strerror(res));
+    if (res != CURLE_OK) {
+        snprintf(result.error, sizeof(result.error), "curl error: %s", curl_easy_strerror(res));
         mb_free(&resp);
-        return NULL;
+        return result;
+    }
+    if (http_code != 200) {
+        if (resp.data && resp.data[0])
+            strncpy(result.error, resp.data, sizeof(result.error) - 1);
+        else
+            snprintf(result.error, sizeof(result.error), "HTTP %ld", http_code);
+        mb_free(&resp);
+        return result;
     }
 
-    char *result = strdup(resp.data ? resp.data : "");
+    result.body = strdup(resp.data ? resp.data : "");
     mb_free(&resp);
     return result;
 #endif
 }
 
-// --- http_post_stream ----------------------------------------------------------------------
+// --- http_post_stream_ex ---------------------------------------------------------------------
 
-bool http_post_stream(const char *url, const char *headers_str, const char *body,
-                      StreamCallback callback, void *userdata, int timeout_ms,
-                      const volatile long *cancelled) {
-    if (!url || !body || !callback) return false;
+bool http_post_stream_ex(const char *url, const char *headers_str, const char *body,
+                         StreamCallback callback, void *userdata, int timeout_ms,
+                         const volatile long *cancelled, HttpStreamResult *result) {
+    if (!result) return false;
+    result->success = false;
+    result->http_status = 0;
+    result->error[0] = '\0';
 
 #ifdef _WIN32
-    char scheme[16] = {0};
-    char host[256] = {0};
-    int port = 443;
-    char path[1024] = {0};
+    if (!url || !body || !callback) {
+        strncpy(result->error, "NULL url, body, or callback", sizeof(result->error) - 1);
+        return false;
+    }
+
+    char scheme[16] = {0}, host[256] = {0}, path[1024] = {0};
     const char *slash_slash = strstr(url, "://");
-    if (!slash_slash) return false;
+    if (!slash_slash) { strncpy(result->error, "Invalid URL", sizeof(result->error) - 1); return false; }
 
     size_t scheme_len = slash_slash - url;
     if (scheme_len > 15) scheme_len = 15;
@@ -401,6 +408,7 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
     const char *host_start = slash_slash + 3;
     const char *path_start = strchr(host_start, '/');
     const char *colon = strchr(host_start, ':');
+    int port = 443;
 
     if (path_start) {
         size_t host_len = path_start - host_start;
@@ -426,25 +434,26 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
         host[host_len] = '\0';
         strncpy(path, "/", sizeof(path));
     }
-
     int use_ssl = (strcmp(scheme, "https") == 0) ? 1 : 0;
 
     wchar_t *w_host = utf8_to_wide(host);
     wchar_t *w_path = utf8_to_wide(path);
 
     HINTERNET hSession = WinHttpOpen(L"NanoClaude/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!hSession) { free(w_host); free(w_path); return false; }
-
+    if (!hSession) { free(w_host); free(w_path);
+        strncpy(result->error, "WinHttpOpen failed", sizeof(result->error) - 1); return false; }
     WinHttpSetTimeouts(hSession, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
 
     HINTERNET hConnect = WinHttpConnect(hSession, w_host, (INTERNET_PORT)port, 0);
     free(w_host);
-    if (!hConnect) { WinHttpCloseHandle(hSession); free(w_path); return false; }
+    if (!hConnect) { WinHttpCloseHandle(hSession); free(w_path);
+        strncpy(result->error, "WinHttpConnect failed", sizeof(result->error) - 1); return false; }
 
     DWORD flags = use_ssl ? WINHTTP_FLAG_SECURE : 0;
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", w_path, NULL, NULL, NULL, flags);
     free(w_path);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+        strncpy(result->error, "WinHttpOpenRequest failed", sizeof(result->error) - 1); return false; }
 
     if (headers_str) {
         wchar_t *w_headers = utf8_to_wide(headers_str);
@@ -453,38 +462,50 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
             free(w_headers);
         }
     }
-
     if (use_ssl) {
         DWORD opts = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
         WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
     }
 
     BOOL sent = WinHttpSendRequest(hRequest, NULL, 0, (LPVOID)body, (DWORD)strlen(body), (DWORD)strlen(body), 0);
-    if (!sent) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+    if (!sent) {
+        DWORD err = GetLastError();
+        snprintf(result->error, sizeof(result->error), "WinHttpSendRequest failed (0x%08lX)", err);
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+        return false;
+    }
+    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+        DWORD err = GetLastError();
+        snprintf(result->error, sizeof(result->error), "WinHttpReceiveResponse failed (0x%08lX)", err);
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+        return false;
+    }
 
     DWORD status_code = 0;
-    DWORD size = sizeof(status_code);
-    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status_code, &size, NULL);
+    DWORD qsize = sizeof(status_code);
+    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status_code, &qsize, NULL);
+    result->http_status = (int)status_code;
 
     if (status_code != 200) {
-        // Read error response body
         Buffer buf; buffer_init(&buf);
         char echunk[4096]; DWORD ebytes_read;
         while (WinHttpReadData(hRequest, echunk, sizeof(echunk) - 1, &ebytes_read) && ebytes_read > 0) {
             echunk[ebytes_read] = '\0';
             buffer_append(&buf, echunk, ebytes_read);
         }
-        DEBUG_LOG("[DEBUG][http_post_stream] HTTP %lu error response: %s\n", status_code, buffer_c_str(&buf));
+        if (buffer_c_str(&buf) && buffer_c_str(&buf)[0])
+            strncpy(result->error, buffer_c_str(&buf), sizeof(result->error) - 1);
+        else
+            snprintf(result->error, sizeof(result->error), "HTTP %lu", status_code);
         buffer_free(&buf);
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
         return false;
     }
 
+    // Read SSE stream
     char chunk[4096];
     char *line_buf = NULL;
-    size_t line_buf_len = 0;
-    size_t line_buf_cap = 0;
+    size_t line_buf_len = 0, line_buf_cap = 0;
     DWORD bytes_read;
 
     while (!cancelled || !*cancelled) {
@@ -500,7 +521,12 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
         if (new_len + 1 > line_buf_cap) {
             size_t new_cap = (new_len + 1) * 2;
             char *new_buf = realloc(line_buf, new_cap);
-            if (!new_buf) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+            if (!new_buf) {
+                strncpy(result->error, "Memory allocation failed", sizeof(result->error) - 1);
+                WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+                free(line_buf);
+                return false;
+            }
             line_buf = new_buf;
             line_buf_cap = new_cap;
         }
@@ -528,21 +554,24 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
     if (line_buf && line_buf_len > 0 && strncmp(line_buf, "data: ", 6) == 0) callback(line_buf + 6, userdata);
     free(line_buf);
     WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+    result->success = true;
     return true;
 
 #else
-    // Linux/macOS: libcurl
-    char scheme[16] = {0};
-    char host[256] = {0};
+    if (!url || !body || !callback) {
+        strncpy(result->error, "NULL url, body, or callback", sizeof(result->error) - 1);
+        return false;
+    }
+
+    char scheme[16] = {0}, host[256] = {0}, path[1024] = {0};
     int port = 443;
-    char path[1024] = {0};
     parse_url(url, scheme, host, &port, path);
 
     char full_url[2048];
     snprintf(full_url, sizeof(full_url), "%s://%s:%d%s", scheme, host, port, path);
 
     CURL *curl = curl_easy_init();
-    if (!curl) return false;
+    if (!curl) { strncpy(result->error, "curl_easy_init failed", sizeof(result->error) - 1); return false; }
 
     struct curl_slist *hdrs = NULL;
     if (headers_str) {
@@ -551,10 +580,7 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
         tmp[sizeof(tmp) - 1] = '\0';
         char *save = NULL;
         char *line = strtok_r(tmp, "\n", &save);
-        while (line) {
-            if (*line) hdrs = curl_slist_append(hdrs, line);
-            line = strtok_r(NULL, "\n", &save);
-        }
+        while (line) { if (*line) hdrs = curl_slist_append(hdrs, line); line = strtok_r(NULL, "\n", &save); }
     }
 
     SSECtx sse;
@@ -567,36 +593,53 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
     if (hdrs) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_sse_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sse);
-    // For streaming: use low-speed detection instead of hard total timeout
-    // A hard total timeout would kill ongoing streams mid-response
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 30000L);  // 30s connect timeout
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);        // abort if < 1 byte/s
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);       // ...for 120s straight
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 30000L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    // Disable progress bar and signals for clean SSE streaming
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
     long http_code = 0;
     CURLcode res = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    result->http_status = (int)http_code;
 
     curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK || http_code != 200) {
-        if (res != CURLE_OK)
-            DEBUG_LOG("[DEBUG][http_post_stream] curl_easy_perform: res=%d (%s) http=%ld\n",
-                    (int)res, curl_easy_strerror(res), http_code);
-        else
-            DEBUG_LOG("[DEBUG][http_post_stream] http_code=%ld (expected 200)\n", http_code);
+    if (res != CURLE_OK) {
+        snprintf(result->error, sizeof(result->error), "curl error: %s", curl_easy_strerror(res));
+        sse_ctx_free(&sse);
+        return false;
+    }
+    if (http_code != 200) {
+        snprintf(result->error, sizeof(result->error), "HTTP %ld", http_code);
         sse_ctx_free(&sse);
         return false;
     }
 
     sse_ctx_free(&sse);
+    result->success = sse.ok;
     return sse.ok;
 #endif
 }
 
+// --- http_post (backward-compatible wrapper) --------------------------------------------------
+
+char *http_post(const char *url, const char *headers_str, const char *body, int timeout_ms) {
+    HttpResponse resp = http_post_ex(url, headers_str, body, timeout_ms);
+    char *out = resp.body;
+    resp.body = NULL;
+    return out;
+}
+
+// --- http_post_stream (backward-compatible wrapper) -------------------------------------------
+
+bool http_post_stream(const char *url, const char *headers_str, const char *body,
+                      StreamCallback callback, void *userdata, int timeout_ms,
+                      const volatile long *cancelled) {
+    HttpStreamResult result;
+    return http_post_stream_ex(url, headers_str, body, callback, userdata, timeout_ms, cancelled, &result);
+}

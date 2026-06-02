@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "config.h"
 #include "cJSON.h"
+#include "retry.h"
 
 typedef enum {
     PROVIDER_ANTHROPIC,
@@ -46,5 +47,7 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
 void provider_set_max_tokens(Provider *p, int max_tokens);
 const char *provider_model(Provider *p);
 ProviderType provider_type(Provider *p);
+void provider_reset_retry_state(Provider *p);
+void provider_reset_stream_failure(Provider *p);
 
 #endif // PROVIDER_H

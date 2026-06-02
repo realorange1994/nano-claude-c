@@ -619,6 +619,9 @@ int repl_run(REPL *repl) {
             // Reset streaming accumulator
             repl_accum_reset(repl);
 
+            // Reset retry state for new API call
+            provider_reset_retry_state(repl->provider);
+
             // Increment turn counter for idle/todo tracking
             todo_list_increment_turn();
 

@@ -3,6 +3,7 @@
 #include "http.h"
 #include "buffer.h"
 #include "config.h"
+#include "retry.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -49,6 +50,7 @@ struct Provider {
     char *model;
     char *base_url;
     int max_tokens;
+    RetryState retry_state;
 };
 
 Provider *provider_new(ProviderType type, const char *api_key, const char *model, const char *base_url, int max_tokens) {
@@ -63,6 +65,7 @@ Provider *provider_new(ProviderType type, const char *api_key, const char *model
         return NULL;
     }
     p->max_tokens = max_tokens > 0 ? max_tokens : 8192;
+    retry_state_init(&p->retry_state);
     return p;
 }
 
@@ -84,6 +87,14 @@ const char *provider_model(Provider *p) {
 
 ProviderType provider_type(Provider *p) {
     return p->type;
+}
+
+void provider_reset_retry_state(Provider *p) {
+    if (p) retry_state_init(&p->retry_state);
+}
+
+void provider_reset_stream_failure(Provider *p) {
+    if (p) retry_state_stream_success(&p->retry_state);
 }
 
 // ============================================================================
@@ -341,7 +352,9 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
     if (!p || !messages) return NULL;
 
     int max_tokens = max_tokens_override > 0 ? max_tokens_override : p->max_tokens;
+    const int max_retries = 3;
 
+    // Build request body and headers (done once, reused on retry)
     char *json_body = NULL;
     char headers[1024];
     char url[512];
@@ -355,85 +368,106 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
         if (system_prompt && system_prompt[0]) {
             cJSON_AddItemToObject(body, "system", cJSON_CreateString(system_prompt));
         }
-
         json_body = cJSON_Print(body);
         cJSON_Delete(body);
-
         snprintf(headers, sizeof(headers),
             "Content-Type: application/json\n"
             "x-api-key: %s\n"
             "anthropic-version: 2023-06-01\n",
             p->api_key);
-
         build_anthropic_url(url, sizeof(url), p->base_url);
     } else {
-        // OpenAI format: convert Anthropic-style messages to OpenAI format
         cJSON *oai_msgs = convert_to_openai_messages(messages);
         if (!oai_msgs) return NULL;
         if (system_prompt && system_prompt[0]) {
             prepend_system_message(oai_msgs, system_prompt);
         }
-
         cJSON *body = cJSON_CreateObject();
         cJSON_AddItemToObject(body, "model", cJSON_CreateString(p->model));
         cJSON_AddItemToObject(body, "messages", oai_msgs);
         cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(max_tokens));
-
         json_body = cJSON_Print(body);
         cJSON_Delete(body);
-        // oai_msgs already freed by cJSON_Delete(body)
-
         snprintf(headers, sizeof(headers),
             "Content-Type: application/json\n"
             "Authorization: Bearer %s\n",
             p->api_key);
-
         build_openai_url(url, sizeof(url), p->base_url);
     }
 
     if (!json_body) return NULL;
 
-    char *response = http_post(url, headers, json_body, 120000);
-    free(json_body);
+    for (int attempt = 0; attempt <= max_retries; attempt++) {
+        HttpResponse resp = http_post_ex(url, headers, json_body, 120000);
 
-    if (!response) return NULL;
+        if (resp.body) {
+            // Success
+            retry_state_on_success(&p->retry_state);
+            free(json_body);
 
-    cJSON *json = cJSON_Parse(response);
-    free(response);
+            cJSON *json = cJSON_Parse(resp.body);
+            free(resp.body);
+            if (!json) return NULL;
 
-    if (!json) return NULL;
-
-    char *content = NULL;
-
-    if (p->type == PROVIDER_ANTHROPIC) {
-        cJSON *content_arr = cJSON_GetObjectItem(json, "content");
-        if (content_arr && cJSON_GetArraySize(content_arr) > 0) {
-            cJSON *item = cJSON_GetArrayItem(content_arr, 0);
-            if (item) {
-                cJSON *text = cJSON_GetObjectItem(item, "text");
-                if (text && text->valuestring) {
-                    content = strdup(text->valuestring);
+            char *content = NULL;
+            if (p->type == PROVIDER_ANTHROPIC) {
+                cJSON *content_arr = cJSON_GetObjectItem(json, "content");
+                if (content_arr && cJSON_GetArraySize(content_arr) > 0) {
+                    cJSON *item = cJSON_GetArrayItem(content_arr, 0);
+                    if (item) {
+                        cJSON *text = cJSON_GetObjectItem(item, "text");
+                        if (text && text->valuestring) content = strdup(text->valuestring);
+                    }
                 }
-            }
-        }
-    } else {
-        cJSON *choices = cJSON_GetObjectItem(json, "choices");
-        if (choices && cJSON_GetArraySize(choices) > 0) {
-            cJSON *choice = cJSON_GetArrayItem(choices, 0);
-            if (choice) {
-                cJSON *msg = cJSON_GetObjectItem(choice, "message");
-                if (msg) {
-                    cJSON *msg_content = cJSON_GetObjectItem(msg, "content");
-                    if (msg_content && msg_content->valuestring) {
-                        content = strdup(msg_content->valuestring);
+            } else {
+                cJSON *choices = cJSON_GetObjectItem(json, "choices");
+                if (choices && cJSON_GetArraySize(choices) > 0) {
+                    cJSON *choice = cJSON_GetArrayItem(choices, 0);
+                    if (choice) {
+                        cJSON *msg = cJSON_GetObjectItem(choice, "message");
+                        if (msg) {
+                            cJSON *msg_content = cJSON_GetObjectItem(msg, "content");
+                            if (msg_content && msg_content->valuestring) content = strdup(msg_content->valuestring);
+                        }
                     }
                 }
             }
+            cJSON_Delete(json);
+            return content;
         }
+
+        // Request failed -- classify error
+        RetryResult r = classify_error(resp.http_status, resp.error);
+        char error_copy[512];
+        strncpy(error_copy, resp.error, sizeof(error_copy) - 1);
+        error_copy[sizeof(error_copy) - 1] = '\0';
+        free(resp.body);
+
+        DEBUG_LOG("[retry][sync] attempt %d/%d failed: HTTP %d, decision=%d: %s\n",
+                  attempt + 1, max_retries + 1, resp.http_status, r.decision, error_copy);
+
+        // Non-retryable or context overflow -> stop retrying
+        if (r.decision == RETRY_NON_RETRYABLE || r.decision == RETRY_CONTEXT_OVERFLOW) {
+            DEBUG_LOG("[retry][sync] non-retryable, stopping\n");
+            break;
+        }
+
+        // Last attempt -> stop
+        if (attempt >= max_retries) break;
+
+        // Wait before retry (use Retry-After if available, else backoff)
+        int delay_ms = r.retry_after_secs > 0 ? r.retry_after_secs * 1000
+                                               : retry_backoff_ms(attempt);
+        DEBUG_LOG("[retry][sync] waiting %dms before retry\n", delay_ms);
+        retry_sleep_ms(delay_ms);
+
+        p->retry_state.consecutive_errors = attempt + 1;
+        p->retry_state.last_error_status = resp.http_status;
+        strncpy(p->retry_state.last_error, error_copy, sizeof(p->retry_state.last_error) - 1);
     }
 
-    cJSON_Delete(json);
-    return content;
+    free(json_body);
+    return NULL;
 }
 
 // ============================================================================
@@ -812,12 +846,32 @@ static void openai_stream_callback(const char *line, void *userdata) {
 bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, void *userdata, ToolRegistry *tools, const volatile long *cancelled, const char *system_prompt) {
     if (!p || !messages || !callback) return false;
 
+    const int max_retries = 3;
+
+    // Check if streaming fallback should be used (3+ consecutive failures)
+    if (retry_state_should_fallback(&p->retry_state)) {
+        DEBUG_LOG("[retry][stream] using sync fallback after %d stream failures\n", p->retry_state.stream_failures);
+        char *content = provider_chat_sync(p, messages, 0, system_prompt);
+        if (content) {
+            StreamChunk chunk = {0};
+            chunk.type = CHUNK_CONTENT;
+            chunk.content = content;
+            callback(&chunk, userdata);
+            free(content);
+        }
+        StreamChunk chunk = {0};
+        chunk.type = CHUNK_DONE;
+        callback(&chunk, userdata);
+        retry_state_stream_success(&p->retry_state);
+        return content != NULL;
+    }
+
+    // Build request body and headers (done once, reused on retry)
     char *json_body = NULL;
     char headers[1024];
     char url[512];
 
     if (p->type == PROVIDER_ANTHROPIC) {
-        // Anthropic format
         cJSON *body = cJSON_CreateObject();
         cJSON_AddItemToObject(body, "model", cJSON_CreateString(p->model));
         cJSON_AddItemToObject(body, "messages", cJSON_Duplicate(messages, 1));
@@ -848,7 +902,6 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
 
         build_anthropic_url(url, sizeof(url), p->base_url);
     } else {
-        // OpenAI format: convert Anthropic-style messages to OpenAI format
         cJSON *oai_msgs = convert_to_openai_messages(messages);
         if (!oai_msgs) { free(json_body); return false; }
         if (system_prompt && system_prompt[0]) {
@@ -872,7 +925,6 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
 
         json_body = cJSON_Print(body);
         cJSON_Delete(body);
-        // oai_msgs already freed by cJSON_Delete(body)
 
         snprintf(headers, sizeof(headers),
             "Content-Type: application/json\n"
@@ -891,37 +943,88 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
         if (dbg) { fputs(json_body, dbg); fclose(dbg); }
     }
 
-    bool success;
+    bool success = false;
 
-    if (p->type == PROVIDER_ANTHROPIC) {
-        StreamContext ctx;
-        ctx.callback = callback;
-        ctx.userdata = userdata;
-        ctx.current_tool_name[0] = '\0';
-        ctx.current_tool_id[0] = '\0';
-        ctx.tool_input_buf = NULL;
-        ctx.tool_input_len = 0;
-        ctx.tool_input_cap = 0;
-        ctx.in_tool_use = 0;
-        ctx.non_json_logged = 0;
+    for (int attempt = 0; attempt <= max_retries; attempt++) {
+        if (p->type == PROVIDER_ANTHROPIC) {
+            StreamContext ctx;
+            ctx.callback = callback;
+            ctx.userdata = userdata;
+            ctx.current_tool_name[0] = '\0';
+            ctx.current_tool_id[0] = '\0';
+            ctx.tool_input_buf = NULL;
+            ctx.tool_input_len = 0;
+            ctx.tool_input_cap = 0;
+            ctx.in_tool_use = 0;
+            ctx.non_json_logged = 0;
 
-        success = http_post_stream(url, headers, json_body, anthropic_stream_callback, &ctx, 600000, cancelled);
-        stream_context_free(&ctx);
-    } else {
-        OpenAIStreamContext ctx;
-        memset(&ctx, 0, sizeof(ctx));
-        ctx.callback = callback;
-        ctx.userdata = userdata;
-        ctx.max_tool_index = -1;
-        ctx.done_sent = 0;
-        ctx.non_json_logged = 0;
+            HttpStreamResult stream_result;
+            success = http_post_stream_ex(url, headers, json_body, anthropic_stream_callback, &ctx, 600000, cancelled, &stream_result);
+            stream_context_free(&ctx);
 
-        success = http_post_stream(url, headers, json_body, openai_stream_callback, &ctx, 600000, cancelled);
-        openai_stream_context_free(&ctx);
+            if (!success) {
+                DEBUG_LOG("[retry][stream] attempt %d/%d failed: HTTP %d: %s\n",
+                          attempt + 1, max_retries + 1, stream_result.http_status, stream_result.error);
+                RetryResult r = classify_error(stream_result.http_status, stream_result.error);
+                if (r.decision == RETRY_NON_RETRYABLE || r.decision == RETRY_CONTEXT_OVERFLOW) {
+                    DEBUG_LOG("[retry][stream] non-retryable, stopping\n");
+                    break;
+                }
+                if (attempt < max_retries) {
+                    int delay_ms = r.retry_after_secs > 0 ? r.retry_after_secs * 1000
+                                                          : retry_backoff_ms(attempt);
+                    DEBUG_LOG("[retry][stream] waiting %dms\n", delay_ms);
+                    retry_sleep_ms(delay_ms);
+                }
+                p->retry_state.consecutive_errors = attempt + 1;
+                p->retry_state.last_error_status = stream_result.http_status;
+                strncpy(p->retry_state.last_error, stream_result.error, sizeof(p->retry_state.last_error) - 1);
+            } else {
+                retry_state_on_success(&p->retry_state);
+                retry_state_stream_success(&p->retry_state);
+                break;
+            }
+        } else {
+            OpenAIStreamContext ctx;
+            memset(&ctx, 0, sizeof(ctx));
+            ctx.callback = callback;
+            ctx.userdata = userdata;
+            ctx.max_tool_index = -1;
+            ctx.done_sent = 0;
+            ctx.non_json_logged = 0;
+
+            HttpStreamResult stream_result;
+            success = http_post_stream_ex(url, headers, json_body, openai_stream_callback, &ctx, 600000, cancelled, &stream_result);
+            openai_stream_context_free(&ctx);
+
+            if (!success) {
+                DEBUG_LOG("[retry][stream] attempt %d/%d failed: HTTP %d: %s\n",
+                          attempt + 1, max_retries + 1, stream_result.http_status, stream_result.error);
+                RetryResult r = classify_error(stream_result.http_status, stream_result.error);
+                if (r.decision == RETRY_NON_RETRYABLE || r.decision == RETRY_CONTEXT_OVERFLOW) {
+                    DEBUG_LOG("[retry][stream] non-retryable, stopping\n");
+                    break;
+                }
+                if (attempt < max_retries) {
+                    int delay_ms = r.retry_after_secs > 0 ? r.retry_after_secs * 1000
+                                                          : retry_backoff_ms(attempt);
+                    DEBUG_LOG("[retry][stream] waiting %dms\n", delay_ms);
+                    retry_sleep_ms(delay_ms);
+                }
+                p->retry_state.consecutive_errors = attempt + 1;
+                p->retry_state.last_error_status = stream_result.http_status;
+                strncpy(p->retry_state.last_error, stream_result.error, sizeof(p->retry_state.last_error) - 1);
+            } else {
+                retry_state_on_success(&p->retry_state);
+                retry_state_stream_success(&p->retry_state);
+                break;
+            }
+        }
     }
 
     if (!success) {
-        DEBUG_LOG("[DEBUG][chat_stream] http_post_stream failed\n");
+        DEBUG_LOG("[DEBUG][chat_stream] all retries exhausted (%d attempts)\n", max_retries + 1);
+        retry_state_stream_failure(&p->retry_state);
     }
 
     free(json_body);
