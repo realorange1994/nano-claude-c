@@ -207,12 +207,12 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON *edit_schema = cJSON_CreateObject();
     cJSON_AddItemToObject(edit_schema, "type", cJSON_CreateString("object"));
     cJSON *edit_props = cJSON_CreateObject();
-    cJSON *epath_prop = cJSON_CreateObject(); cJSON_AddItemToObject(epath_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(epath_prop, "description", cJSON_CreateString("File path to edit")); cJSON_AddItemToObject(edit_props, "path", epath_prop);
+    cJSON *epath_prop = cJSON_CreateObject(); cJSON_AddItemToObject(epath_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(epath_prop, "description", cJSON_CreateString("File path to edit")); cJSON_AddItemToObject(edit_props, "file_path", epath_prop);
     cJSON *old_prop = cJSON_CreateObject(); cJSON_AddItemToObject(old_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(old_prop, "description", cJSON_CreateString("Text to replace")); cJSON_AddItemToObject(edit_props, "old_string", old_prop);
     cJSON *new_prop = cJSON_CreateObject(); cJSON_AddItemToObject(new_prop, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(new_prop, "description", cJSON_CreateString("Replacement text")); cJSON_AddItemToObject(edit_props, "new_string", new_prop);
     cJSON *ra_prop = cJSON_CreateObject(); cJSON_AddItemToObject(ra_prop, "type", cJSON_CreateString("boolean")); cJSON_AddItemToObject(ra_prop, "description", cJSON_CreateString("Replace all occurrences")); cJSON_AddItemToObject(edit_props, "replace_all", ra_prop);
     cJSON_AddItemToObject(edit_schema, "properties", edit_props);
-    cJSON *edit_required = cJSON_CreateArray(); cJSON_AddItemToArray(edit_required, cJSON_CreateString("path")); cJSON_AddItemToArray(edit_required, cJSON_CreateString("old_string")); cJSON_AddItemToArray(edit_required, cJSON_CreateString("new_string")); cJSON_AddItemToObject(edit_schema, "required", edit_required);
+    cJSON *edit_required = cJSON_CreateArray(); cJSON_AddItemToArray(edit_required, cJSON_CreateString("file_path")); cJSON_AddItemToArray(edit_required, cJSON_CreateString("old_string")); cJSON_AddItemToArray(edit_required, cJSON_CreateString("new_string")); cJSON_AddItemToObject(edit_schema, "required", edit_required);
     tool_register(reg, "Edit", "Edit file content", edit_schema, tool_edit_file);
 
     // Grep tool

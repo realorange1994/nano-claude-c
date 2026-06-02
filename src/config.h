@@ -32,7 +32,7 @@ extern Config g_config;
 // Global verbose flag (-v)
 extern int g_verbose;
 
-#define DEBUG_LOG(fmt, ...) do { if (g_verbose) { fprintf(stderr, fmt, __VA_ARGS__); fflush(stderr); } } while(0)
+#define DEBUG_LOG(fmt, ...) do { if (g_verbose) { fprintf(stderr, fmt, ##__VA_ARGS__); fflush(stderr); } } while(0)
 
 // Load config from file
 bool config_load(const char *path);

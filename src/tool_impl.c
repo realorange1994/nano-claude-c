@@ -638,11 +638,11 @@ static int fuzzy_find_text(const char *content, const char *search) {
 }
 
 char *tool_edit_file(cJSON *input, char **error) {
-    cJSON *path = cJSON_GetObjectItem(input, "path");
+    cJSON *path = cJSON_GetObjectItem(input, "file_path");
     cJSON *old_str = cJSON_GetObjectItem(input, "old_string");
     cJSON *new_str = cJSON_GetObjectItem(input, "new_string");
     cJSON *replace_all_item = cJSON_GetObjectItem(input, "replace_all");
-    if (!path || !path->valuestring) { *error = strdup("missing path"); return NULL; }
+    if (!path || !path->valuestring) { *error = strdup("missing file_path"); return NULL; }
     if (!old_str || !old_str->valuestring) { *error = strdup("missing old_string"); return NULL; }
     if (!new_str || !new_str->valuestring) { *error = strdup("missing new_string"); return NULL; }
 
@@ -918,6 +918,7 @@ char *tool_glob(cJSON *input, char **error) {
     return output ? output : strdup("");
 }
 
+#ifdef _WIN32
 // ============== Shell command escaping for bash -c ==============
 static char *escape_bash_command(const char *cmd) {
     if (!cmd) return strdup("");
@@ -941,6 +942,7 @@ static char *escape_bash_command(const char *cmd) {
     escaped[j] = '\0';
     return escaped;
 }
+#endif
 
 // ============== Shell tool ==============
 char *tool_exec(cJSON *input, char **error) {
