@@ -530,6 +530,9 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
     // Disable progress bar and signals for clean SSE streaming
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    // Low-speed detection: abort if < 1 byte/s for 120s (catches dead connections)
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
 
     long http_code = 0;
     CURLcode res = curl_easy_perform(curl);
@@ -539,6 +542,11 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK || http_code != 200) {
+        if (res != CURLE_OK)
+            fprintf(stderr, "[DEBUG][http_post_stream] curl_easy_perform: res=%d (%s) http=%ld\n",
+                    (int)res, curl_easy_strerror(res), http_code);
+        else
+            fprintf(stderr, "[DEBUG][http_post_stream] http_code=%ld (expected 200)\n", http_code);
         sse_ctx_free(&sse);
         return false;
     }

@@ -484,7 +484,7 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
     ctx.tool_input_cap = 0;
     ctx.in_tool_use = 0;
 
-    bool success = http_post_stream(url, headers, json_body, stream_callback, &ctx, 120000, cancelled);
+    bool success = http_post_stream(url, headers, json_body, stream_callback, &ctx, 600000, cancelled);
 
     stream_context_free(&ctx);
     free(json_body);
