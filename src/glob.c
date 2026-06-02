@@ -93,6 +93,7 @@ static int should_skip_dir(const char *dirname) {
 
 // Walk directory iteratively
 static void walk_directory(const char *start_dir, const char *file_pattern, GlobConfig *cfg, GlobResult *result) {
+    int limit = cfg->limit;
 #ifdef _WIN32
     // Windows: FindFirstFile/FindNextFile
     typedef struct DirEntry {
@@ -145,10 +146,14 @@ static void walk_directory(const char *start_dir, const char *file_pattern, Glob
             if (cfg->type_filter == GLOB_TYPE_DIR && !is_directory) continue;
 
             if (glob_match(fd.cFileName, file_pattern)) {
+                result->total++;
+
+                // Stop adding to buffer if we hit the limit
+                if (limit > 0 && result->count >= limit) break;
+
                 buffer_append_str(&result->buf, full_path);
                 buffer_append_str(&result->buf, "\n");
                 result->count++;
-                if (cfg->max_results > 0 && result->count >= cfg->max_results) break;
             }
         } while (FindNextFileA(h, &fd) && !is_output_full(result));
 
@@ -208,10 +213,14 @@ static void walk_directory(const char *start_dir, const char *file_pattern, Glob
             if (cfg->type_filter == GLOB_TYPE_DIR && !is_directory) continue;
 
             if (glob_match(entry->d_name, file_pattern)) {
+                result->total++;
+
+                // Stop adding to buffer if we hit the limit
+                if (limit > 0 && result->count >= limit) break;
+
                 buffer_append_str(&result->buf, full_path);
                 buffer_append_str(&result->buf, "\n");
                 result->count++;
-                if (cfg->max_results > 0 && result->count >= cfg->max_results) break;
             }
         }
         closedir(d);
@@ -234,6 +243,7 @@ GlobResult *glob_search(GlobConfig *cfg) {
 
     buffer_init(&result->buf);
     result->count = 0;
+    result->total = 0;
 
     const char *dir = cfg->path ? cfg->path : ".";
     char dir_buf[MAX_P];
@@ -291,6 +301,11 @@ GlobResult *glob_search(GlobConfig *cfg) {
         }
     }
 
+    // Determine effective limit: head_limit overrides max_results if set > 0
+    int limit = cfg->head_limit > 0 ? cfg->head_limit
+                : cfg->max_results > 0 ? cfg->max_results : 0;
+    cfg->limit = limit;
+
     if (recursive) {
         walk_directory(dir, pattern, cfg, result);
     } else {
@@ -316,14 +331,18 @@ GlobResult *glob_search(GlobConfig *cfg) {
                 if (cfg->type_filter == GLOB_TYPE_DIR && !is_directory) continue;
 
                 if (glob_match(fd.cFileName, pattern)) {
+                    result->total++;
+
+                    // Stop adding to buffer if we hit the limit
+                    if (limit > 0 && result->count >= limit) break;
+
                     char full_path[MAX_P];
                     snprintf(full_path, sizeof(full_path), "%s\\%s", dir, fd.cFileName);
                     buffer_append_str(&result->buf, full_path);
                     buffer_append_str(&result->buf, "\n");
                     result->count++;
-                    if (cfg->max_results > 0 && result->count >= cfg->max_results) break;
                 }
-            } while (FindNextFileA(h, &fd));
+            } while (FindNextFileA(h, &fd) && !is_output_full(result));
             FindClose(h);
         }
 #else
@@ -341,10 +360,14 @@ GlobResult *glob_search(GlobConfig *cfg) {
                 if (cfg->type_filter == GLOB_TYPE_DIR && !is_dir(full_path)) continue;
 
                 if (glob_match(entry->d_name, pattern)) {
+                    result->total++;
+
+                    // Stop adding to buffer if we hit the limit
+                    if (limit > 0 && result->count >= limit) break;
+
                     buffer_append_str(&result->buf, full_path);
                     buffer_append_str(&result->buf, "\n");
                     result->count++;
-                    if (cfg->max_results > 0 && result->count >= cfg->max_results) break;
                 }
             }
             closedir(d);
@@ -352,12 +375,19 @@ GlobResult *glob_search(GlobConfig *cfg) {
 #endif
     }
 
+    // Append truncation message if limit was reached
+    if (limit > 0 && result->total > limit) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "(showing first %d of %d matches)\n", limit, result->total);
+        buffer_append_str(&result->buf, msg);
+    }
+
     return result;
 }
 
 char *glob_get_output(GlobResult *result) {
     if (!result || !result->buf.data) return strdup("No matches found.");
-    if (result->count == 0) return strdup("No matches found.");
+    if (result->total == 0) return strdup("No matches found.");
     char *data = result->buf.data;
     result->buf.data = NULL;
     result->buf.len = 0;

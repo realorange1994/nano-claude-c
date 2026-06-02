@@ -876,14 +876,21 @@ char *tool_grep(cJSON *input, char **error) {
     item = cJSON_GetObjectItem(input, "glob"); cfg.glob = (item && item->valuestring) ? item->valuestring : NULL;
     item = cJSON_GetObjectItem(input, "fileType"); cfg.file_type = (item && item->valuestring) ? item->valuestring : NULL;
     item = cJSON_GetObjectItem(input, "context"); cfg.context = (item && item->type == cJSON_Number) ? (int)item->valuedouble : 0;
-    item = cJSON_GetObjectItem(input, "maxCount"); cfg.max_count = (item && item->type == cJSON_Number) ? (int)item->valuedouble : 100;
+    item = cJSON_GetObjectItem(input, "maxCount"); cfg.max_count = (item && item->type == cJSON_Number) ? (int)item->valuedouble : 0;
     item = cJSON_GetObjectItem(input, "maxResults"); cfg.max_results = (item && item->type == cJSON_Number) ? (int)item->valuedouble : 250;
+    item = cJSON_GetObjectItem(input, "head_limit"); cfg.head_limit = (item && item->type == cJSON_Number) ? (int)item->valuedouble : 0;
     cfg.case_sensitive = 0; cfg.include_binary = 0; cfg.max_line_length = 500; cfg.output_mode = OUTPUT_CONTENT;
 
     item = cJSON_GetObjectItem(input, "outputMode");
     if (item && item->valuestring) {
         if (strcmp(item->valuestring, "files_with_matches") == 0) cfg.output_mode = OUTPUT_FILES;
         else if (strcmp(item->valuestring, "count") == 0) cfg.output_mode = OUTPUT_COUNT;
+    }
+
+    item = cJSON_GetObjectItem(input, "caseInsensitive");
+    if (item && item->type == cJSON_True) cfg.case_sensitive = 0;
+    if (cJSON_GetObjectItem(input, "-i") || cJSON_GetObjectItem(input, "ignore_case") || cJSON_GetObjectItem(input, "case_insensitive")) {
+        cfg.case_sensitive = 0;
     }
 
     RGrepResult *result = rgrep_search(&cfg);
@@ -904,6 +911,7 @@ char *tool_glob(cJSON *input, char **error) {
     cJSON *p_item;
     p_item = cJSON_GetObjectItem(input, "path"); cfg.path = (p_item && p_item->valuestring) ? p_item->valuestring : ".";
     p_item = cJSON_GetObjectItem(input, "maxResults"); cfg.max_results = (p_item && p_item->type == cJSON_Number) ? (int)p_item->valuedouble : 100;
+    p_item = cJSON_GetObjectItem(input, "head_limit"); cfg.head_limit = (p_item && p_item->type == cJSON_Number) ? (int)p_item->valuedouble : 0;
     cfg.exclude_hidden = 1; cfg.type_filter = GLOB_TYPE_FILE;
 
     p_item = cJSON_GetObjectItem(input, "type");

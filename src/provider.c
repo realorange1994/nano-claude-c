@@ -352,7 +352,7 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
     if (!p || !messages) return NULL;
 
     int max_tokens = max_tokens_override > 0 ? max_tokens_override : p->max_tokens;
-    const int max_retries = 3;
+    const int max_retries = 15;
 
     // Build request body and headers (done once, reused on retry)
     char *json_body = NULL;
@@ -846,7 +846,7 @@ static void openai_stream_callback(const char *line, void *userdata) {
 bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, void *userdata, ToolRegistry *tools, const volatile long *cancelled, const char *system_prompt) {
     if (!p || !messages || !callback) return false;
 
-    const int max_retries = 3;
+    const int max_retries = 15;
 
     // Check if streaming fallback should be used (3+ consecutive failures)
     if (retry_state_should_fallback(&p->retry_state)) {

@@ -150,8 +150,12 @@ static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *res
 
         if (regex_matches(line, cfg->pattern, cfg->case_sensitive)) {
             file_matches++;
+            result->total_matches++;
+
+            // Stop adding to buffer if we hit the limit
+            if (cfg->limit > 0 && result->shown_matches >= cfg->limit) break;
+
             if (cfg->max_count > 0 && file_matches > cfg->max_count) break;
-            if (is_output_full(result)) { fclose(f); return; }
 
             switch (cfg->output_mode) {
                 case OUTPUT_FILES:
@@ -176,7 +180,7 @@ static void search_file(const char *filepath, RGrepConfig *cfg, RGrepResult *res
                     break;
                 }
             }
-            result->total_matches++;
+            result->shown_matches++;
         }
     }
     if (file_matches > 0) result->files_matched++;
@@ -290,9 +294,15 @@ RGrepResult *rgrep_search(RGrepConfig *cfg) {
     result->files_scanned = 0;
     result->files_matched = 0;
     result->total_matches = 0;
+    result->shown_matches = 0;
 
     const char *search_path = cfg->path ? cfg->path : ".";
     if (!search_path || !search_path[0]) search_path = ".";
+
+    // Determine effective limit: head_limit overrides max_results if set > 0
+    int limit = cfg->head_limit > 0 ? cfg->head_limit
+                : cfg->max_results > 0 ? cfg->max_results : 0;
+    cfg->limit = limit;
 
     if (path_is_dir(search_path)) {
         walk_directory(search_path, cfg, result);
@@ -301,6 +311,13 @@ RGrepResult *rgrep_search(RGrepConfig *cfg) {
             result->files_scanned = 1;
             search_file(search_path, cfg, result);
         }
+    }
+
+    // Append truncation message if limit was reached
+    if (limit > 0 && result->total_matches > limit) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "(showing first %d of %d matches, truncated)\n", limit, result->total_matches);
+        buffer_append_str(&result->buf, msg);
     }
     return result;
 }

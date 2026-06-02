@@ -20,6 +20,8 @@ typedef struct {
     int context;              // Lines of context before/after
     int max_count;            // Max matches per file (0 = unlimited)
     int max_results;          // Max total results (0 = unlimited)
+    int head_limit;           // Override for max_results (0 = use max_results)
+    int limit;                // Effective limit (computed internally)
     bool case_sensitive;      // Case sensitive matching
     bool include_binary;       // Include binary files
     int max_line_length;      // Max line length to include
@@ -30,7 +32,8 @@ typedef struct {
 typedef struct {
     int files_scanned;
     int files_matched;
-    int total_matches;
+    int total_matches;    // matches before head_limit truncation
+    int shown_matches;    // matches actually shown (after head_limit)
     Buffer buf;
 } RGrepResult;
 

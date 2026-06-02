@@ -17,13 +17,16 @@ typedef struct {
     char *path;             // Directory to search (default: ".")
     GlobType type_filter;   // Type filter: file, dir, all
     int max_results;        // Maximum results (0 = unlimited)
+    int head_limit;         // Override for max_results (0 = use max_results)
+    int limit;              // Effective limit (computed internally)
     bool exclude_hidden;    // Exclude hidden files
 } GlobConfig;
 
 // Search result
 typedef struct {
     Buffer buf;             // Result buffer
-    int count;             // Number of matches
+    int count;             // Matches shown (after limit)
+    int total;             // Total matches found
 } GlobResult;
 
 // Search function
