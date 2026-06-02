@@ -963,6 +963,11 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
             stream_context_free(&ctx);
 
             if (!success) {
+                // Ensure the stream is properly terminated for the callback
+                StreamChunk done_chunk = {0};
+                done_chunk.type = CHUNK_DONE;
+                callback(&done_chunk, userdata);
+
                 DEBUG_LOG("[retry][stream] attempt %d/%d failed: HTTP %d: %s\n",
                           attempt + 1, max_retries + 1, stream_result.http_status, stream_result.error);
                 RetryResult r = classify_error(stream_result.http_status, stream_result.error);
@@ -998,6 +1003,11 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
             openai_stream_context_free(&ctx);
 
             if (!success) {
+                // Ensure the stream is properly terminated for the callback
+                StreamChunk done_chunk = {0};
+                done_chunk.type = CHUNK_DONE;
+                callback(&done_chunk, userdata);
+
                 DEBUG_LOG("[retry][stream] attempt %d/%d failed: HTTP %d: %s\n",
                           attempt + 1, max_retries + 1, stream_result.http_status, stream_result.error);
                 RetryResult r = classify_error(stream_result.http_status, stream_result.error);
@@ -1022,9 +1032,12 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
         }
     }
 
-    if (!success) {
-        DEBUG_LOG("[DEBUG][chat_stream] all retries exhausted (%d attempts)\n", max_retries + 1);
-        retry_state_stream_failure(&p->retry_state);
+    // Ensure stream is always terminated (handles case where server sends partial data
+    // then closes connection without [DONE], or retries exhausted)
+    {
+        StreamChunk done_chunk = {0};
+        done_chunk.type = CHUNK_DONE;
+        callback(&done_chunk, userdata);
     }
 
     free(json_body);
