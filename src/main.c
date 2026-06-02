@@ -50,7 +50,7 @@ static void print_help(const char *prog) {
     printf("  -h, --help        Show this help\n");
     printf("  -c, --config FILE  Config file path (default: ~/.nanoclaude/config.json)\n");
     printf("  -m, --model MODEL  Override model\n");
-    printf("  --provider TYPE    Provider: anthropic (default) or openai\n");
+    printf("  --provider TYPE    Provider (anthropic|openai, default: anthropic)\n");
     printf("  --api-key KEY     API key (or set ANTHROPIC_API_KEY env)\n");
     printf("  --base-url URL    Custom API base URL\n");
     printf("  --max-tokens N    Max response tokens (default: 8192)\n");
@@ -114,12 +114,20 @@ int main(int argc, char *argv[]) {
 
     ProviderType provider_type = PROVIDER_ANTHROPIC;
     if (provider_override) {
-        if (strcmp(provider_override, "openai") == 0) {
+        if (strcmp(provider_override, "anthropic") == 0) {
+            provider_type = PROVIDER_ANTHROPIC;
+        } else if (strcmp(provider_override, "openai") == 0) {
             provider_type = PROVIDER_OPENAI;
+        } else {
+            fprintf(stderr, "Error: Unknown provider '%s' (must be anthropic or openai)\n", provider_override);
+            return 1;
         }
     } else {
         if (strcmp(g_config.provider, "openai") == 0) {
             provider_type = PROVIDER_OPENAI;
+        } else if (g_config.provider[0] != '\0' && strcmp(g_config.provider, "anthropic") != 0) {
+            fprintf(stderr, "Error: Unknown provider '%s' in config (must be anthropic or openai)\n", g_config.provider);
+            return 1;
         }
     }
 

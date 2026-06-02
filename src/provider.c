@@ -2,6 +2,7 @@
 #include "tool.h"
 #include "http.h"
 #include "buffer.h"
+#include "config.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -49,6 +50,64 @@ ProviderType provider_type(Provider *p) {
     return p->type;
 }
 
+// ============================================================================
+// Helper: prepend system prompt as system role message (for OpenAI format)
+// ============================================================================
+
+static cJSON *prepend_system_message(cJSON *messages, const char *system_prompt) {
+    if (!system_prompt || !system_prompt[0]) return messages;
+    cJSON *sys_msg = cJSON_CreateObject();
+    cJSON_AddItemToObject(sys_msg, "role", cJSON_CreateString("system"));
+    cJSON_AddItemToObject(sys_msg, "content", cJSON_CreateString(system_prompt));
+    cJSON_InsertItemInArray(messages, 0, sys_msg);
+    return messages;
+}
+
+// ============================================================================
+// Helper: build OpenAI-style tool definitions
+// ============================================================================
+
+static cJSON *build_openai_tool(Tool *tool) {
+    cJSON *t = cJSON_CreateObject();
+    cJSON_AddItemToObject(t, "type", cJSON_CreateString("function"));
+    cJSON *fn = cJSON_CreateObject();
+    cJSON_AddItemToObject(fn, "name", cJSON_CreateString(tool->name));
+    cJSON_AddItemToObject(fn, "description", cJSON_CreateString(tool->description));
+    if (tool->input_schema) {
+        cJSON_AddItemToObject(fn, "parameters", cJSON_Duplicate(tool->input_schema, 1));
+    } else {
+        cJSON *schema = cJSON_CreateObject();
+        cJSON_AddItemToObject(schema, "type", cJSON_CreateString("object"));
+        cJSON_AddItemToObject(schema, "properties", cJSON_CreateObject());
+        cJSON_AddItemToObject(fn, "parameters", schema);
+    }
+    cJSON_AddItemToObject(t, "function", fn);
+    return t;
+}
+
+// ============================================================================
+// Helper: build Anthropic-style tool definitions
+// ============================================================================
+
+static cJSON *build_anthropic_tool(Tool *tool) {
+    cJSON *t = cJSON_CreateObject();
+    cJSON_AddItemToObject(t, "name", cJSON_CreateString(tool->name));
+    cJSON_AddItemToObject(t, "description", cJSON_CreateString(tool->description));
+    if (tool->input_schema) {
+        cJSON_AddItemToObject(t, "input_schema", cJSON_Duplicate(tool->input_schema, 1));
+    } else {
+        cJSON *schema = cJSON_CreateObject();
+        cJSON_AddItemToObject(schema, "type", cJSON_CreateString("object"));
+        cJSON_AddItemToObject(schema, "properties", cJSON_CreateObject());
+        cJSON_AddItemToObject(t, "input_schema", schema);
+    }
+    return t;
+}
+
+// ============================================================================
+// Sync chat (for compaction summary)
+// ============================================================================
+
 char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, const char *system_prompt) {
     if (!p || !messages) return NULL;
 
@@ -59,7 +118,6 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
     char url[512];
 
     if (p->type == PROVIDER_ANTHROPIC) {
-        // Anthropic format
         cJSON *body = cJSON_CreateObject();
         cJSON_AddItemToObject(body, "model", cJSON_CreateString(p->model));
         cJSON_AddItemToObject(body, "messages", cJSON_Duplicate(messages, 1));
@@ -71,13 +129,13 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
 
         json_body = cJSON_Print(body);
         cJSON_Delete(body);
-        
+
         snprintf(headers, sizeof(headers),
             "Content-Type: application/json\n"
             "x-api-key: %s\n"
             "anthropic-version: 2023-06-01\n",
             p->api_key);
-        
+
         if (p->base_url) {
             snprintf(url, sizeof(url), "%s/v1/messages", p->base_url);
         } else {
@@ -85,30 +143,31 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
         }
     } else {
         // OpenAI format
+        cJSON *msgs = cJSON_Duplicate(messages, 1);
+        if (system_prompt && system_prompt[0]) {
+            msgs = prepend_system_message(msgs, system_prompt);
+        }
+
         cJSON *body = cJSON_CreateObject();
         cJSON_AddItemToObject(body, "model", cJSON_CreateString(p->model));
-        cJSON_AddItemToObject(body, "messages", cJSON_Duplicate(messages, 1));
+        cJSON_AddItemToObject(body, "messages", msgs);
         cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(max_tokens));
-        cJSON_AddItemToObject(body, "stream", cJSON_CreateBool(false));
-        if (system_prompt && system_prompt[0]) {
-            cJSON_AddItemToObject(body, "system", cJSON_CreateString(system_prompt));
-        }
-        
+
         json_body = cJSON_Print(body);
         cJSON_Delete(body);
-        
+
         snprintf(headers, sizeof(headers),
             "Content-Type: application/json\n"
             "Authorization: Bearer %s\n",
             p->api_key);
-        
+
         if (p->base_url) {
             snprintf(url, sizeof(url), "%s/v1/chat/completions", p->base_url);
         } else {
             snprintf(url, sizeof(url), "https://api.openai.com/v1/chat/completions");
         }
     }
-    
+
     if (!json_body) return NULL;
 
     char *response = http_post(url, headers, json_body, 120000);
@@ -119,9 +178,7 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
     cJSON *json = cJSON_Parse(response);
     free(response);
 
-    if (!json) {
-        return NULL;
-    }
+    if (!json) return NULL;
 
     char *content = NULL;
 
@@ -156,17 +213,20 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
     return content;
 }
 
+// ============================================================================
+// Anthropic streaming parser
+// ============================================================================
+
 typedef struct {
     ChunkCallback callback;
     void *userdata;
-    // Tool call state
     char current_tool_name[256];
     char current_tool_id[256];
-    char *tool_input_buf;      // Dynamically allocated tool input buffer
-    size_t tool_input_len;     // Current length of tool input
-    size_t tool_input_cap;     // Capacity of tool input buffer
+    char *tool_input_buf;
+    size_t tool_input_len;
+    size_t tool_input_cap;
     int in_tool_use;
-    int non_json_logged;       // Debug: track non-JSON lines
+    int non_json_logged;
 } StreamContext;
 
 static void stream_context_free(StreamContext *ctx) {
@@ -178,10 +238,7 @@ static void stream_context_append_tool_input(StreamContext *ctx, const char *dat
     if (needed > ctx->tool_input_cap) {
         ctx->tool_input_cap = needed * 2;
         char *new_buf = realloc(ctx->tool_input_buf, ctx->tool_input_cap);
-        if (!new_buf) {
-            ctx->tool_input_cap = needed;
-            return;
-        }
+        if (!new_buf) { ctx->tool_input_cap = needed; return; }
         ctx->tool_input_buf = new_buf;
     }
     if (ctx->tool_input_buf && ctx->tool_input_cap > ctx->tool_input_len + data_len) {
@@ -194,75 +251,45 @@ static void stream_context_append_tool_input(StreamContext *ctx, const char *dat
 static void stream_flush_tool(StreamContext *ctx) {
     if (!ctx->in_tool_use) return;
 
-    // Parse JSON tool input with recovery for incomplete/partial JSON
-    // (like miniclaude's parseAnthropicJSONArgs)
     char *input_json = NULL;
     if (ctx->tool_input_buf && ctx->tool_input_len > 0) {
-        // First try direct parse
         cJSON *parsed = cJSON_Parse(ctx->tool_input_buf);
         if (parsed) {
             input_json = cJSON_PrintUnformatted(parsed);
             cJSON_Delete(parsed);
         } else {
-            // JSON parse failed - try to extract a valid JSON object
-            // by scanning for balanced braces (like extractJSONObject)
+            // JSON recovery: scan for balanced braces
             const char *s = ctx->tool_input_buf;
             size_t s_len = ctx->tool_input_len;
-
-            // Find first '{' that starts a complete JSON object
             for (size_t start = 0; start < s_len; start++) {
                 if (s[start] != '{') continue;
-
-                int depth = 0;
-                int in_string = 0;
-                int escaped = 0;
-
+                int depth = 0, in_string = 0, escaped = 0;
                 for (size_t i = start; i < s_len; i++) {
                     unsigned char c = (unsigned char)s[i];
-
-                    if (escaped) {
-                        escaped = 0;
-                        continue;
-                    }
-                    if (c == '\\' && in_string) {
-                        escaped = 1;
-                        continue;
-                    }
-                    if (c == '"') {
-                        in_string = !in_string;
-                        continue;
-                    }
+                    if (escaped) { escaped = 0; continue; }
+                    if (c == '\\' && in_string) { escaped = 1; continue; }
+                    if (c == '"') { in_string = !in_string; continue; }
                     if (in_string) continue;
-
                     if (c == '{') depth++;
                     else if (c == '}') {
                         depth--;
                         if (depth == 0) {
-                            // Found complete JSON object from start to i
                             size_t json_len = i - start + 1;
                             char *json_str = malloc(json_len + 1);
                             memcpy(json_str, s + start, json_len);
                             json_str[json_len] = '\0';
-
                             parsed = cJSON_Parse(json_str);
-                            if (parsed) {
-                                input_json = cJSON_PrintUnformatted(parsed);
-                                cJSON_Delete(parsed);
-                            }
+                            if (parsed) { input_json = cJSON_PrintUnformatted(parsed); cJSON_Delete(parsed); }
                             free(json_str);
                             goto done_json_recovery;
                         }
                     }
                 }
             }
-
-done_json_recovery:
-            ;
+done_json_recovery: ;
         }
     }
-    if (!input_json) {
-        input_json = strdup("{}");
-    }
+    if (!input_json) input_json = strdup("{}");
 
     StreamChunk chunk = {0};
     chunk.type = CHUNK_TOOL_CALL;
@@ -272,7 +299,6 @@ done_json_recovery:
     ctx->callback(&chunk, ctx->userdata);
     free(input_json);
 
-    // Clear tool state
     ctx->current_tool_name[0] = '\0';
     ctx->current_tool_id[0] = '\0';
     ctx->tool_input_len = 0;
@@ -294,21 +320,11 @@ static void stream_handle_text_delta(cJSON *delta, StreamContext *ctx) {
 static void stream_handle_content_block_start(cJSON *block, StreamContext *ctx) {
     cJSON *type = cJSON_GetObjectItem(block, "type");
     if (!type || !type->valuestring) return;
-
     if (strcmp(type->valuestring, "tool_use") == 0) {
-        // Start of a tool call - capture name and id only
         cJSON *name = cJSON_GetObjectItem(block, "name");
         cJSON *id = cJSON_GetObjectItem(block, "id");
-
-        if (name && name->valuestring) {
-            strncpy(ctx->current_tool_name, name->valuestring, sizeof(ctx->current_tool_name) - 1);
-        }
-        if (id && id->valuestring) {
-            strncpy(ctx->current_tool_id, id->valuestring, sizeof(ctx->current_tool_id) - 1);
-        }
-
-        // Clear tool input buffer - only collect from input_json_delta deltas
-        // (like miniclaude's pendingToolArgs = nil pattern)
+        if (name && name->valuestring) strncpy(ctx->current_tool_name, name->valuestring, sizeof(ctx->current_tool_name) - 1);
+        if (id && id->valuestring) strncpy(ctx->current_tool_id, id->valuestring, sizeof(ctx->current_tool_id) - 1);
         ctx->tool_input_len = 0;
         if (ctx->tool_input_buf) ctx->tool_input_buf[0] = '\0';
         ctx->in_tool_use = 1;
@@ -318,11 +334,9 @@ static void stream_handle_content_block_start(cJSON *block, StreamContext *ctx) 
 static void stream_handle_content_block_delta(cJSON *delta, StreamContext *ctx) {
     cJSON *type = cJSON_GetObjectItem(delta, "type");
     if (!type || !type->valuestring) return;
-
     if (strcmp(type->valuestring, "text_delta") == 0) {
         stream_handle_text_delta(delta, ctx);
     } else if (strcmp(type->valuestring, "input_json_delta") == 0) {
-        // Tool input delta
         if (ctx->in_tool_use) {
             cJSON *partial = cJSON_GetObjectItem(delta, "partial_json");
             if (partial && partial->valuestring) {
@@ -336,20 +350,16 @@ static void stream_handle_content_block_delta(cJSON *delta, StreamContext *ctx) 
 static void stream_handle_content_block_end(cJSON *block, StreamContext *ctx) {
     cJSON *type = cJSON_GetObjectItem(block, "type");
     if (!type || !type->valuestring) return;
-    
     if (strcmp(type->valuestring, "tool_use") == 0) {
-        // End of tool call - flush it
         stream_flush_tool(ctx);
     }
 }
 
-static void stream_callback(const char *line, void *userdata) {
+// Anthropic SSE stream callback
+static void anthropic_stream_callback(const char *line, void *userdata) {
     StreamContext *ctx = (StreamContext *)userdata;
-
-    // Skip empty lines
     if (!line || *line == '\0') return;
 
-    // Handle [DONE] marker
     if (strcmp(line, "[DONE]") == 0) {
         stream_flush_tool(ctx);
         StreamChunk chunk = {0};
@@ -361,39 +371,29 @@ static void stream_callback(const char *line, void *userdata) {
     cJSON *json = cJSON_Parse(line);
     if (!json) {
         if (!ctx->non_json_logged && strlen(line) > 10) {
-            DEBUG_LOG("[DEBUG][stream_callback] Non-JSON response: %.300s\n", line);
+            DEBUG_LOG("[DEBUG][anthropic_stream] Non-JSON: %.300s\n", line);
             ctx->non_json_logged = 1;
         }
         return;
     }
-    
+
     cJSON *type = cJSON_GetObjectItem(json, "type");
-    if (!type || !type->valuestring) {
-        cJSON_Delete(json);
-        return;
-    }
-    
+    if (!type || !type->valuestring) { cJSON_Delete(json); return; }
+
     if (strcmp(type->valuestring, "content_block_start") == 0) {
-        cJSON *content_block = cJSON_GetObjectItem(json, "content_block");
-        if (content_block) {
-            stream_handle_content_block_start(content_block, ctx);
-        }
+        cJSON *cb = cJSON_GetObjectItem(json, "content_block");
+        if (cb) stream_handle_content_block_start(cb, ctx);
     } else if (strcmp(type->valuestring, "content_block_delta") == 0) {
         cJSON *delta = cJSON_GetObjectItem(json, "delta");
-        if (delta) {
-            stream_handle_content_block_delta(delta, ctx);
-        }
+        if (delta) stream_handle_content_block_delta(delta, ctx);
     } else if (strcmp(type->valuestring, "content_block_end") == 0) {
-        cJSON *content_block = cJSON_GetObjectItem(json, "content_block");
-        if (content_block) {
-            stream_handle_content_block_end(content_block, ctx);
-        }
+        cJSON *cb = cJSON_GetObjectItem(json, "content_block");
+        if (cb) stream_handle_content_block_end(cb, ctx);
     } else if (strcmp(type->valuestring, "message_delta") == 0) {
         cJSON *delta = cJSON_GetObjectItem(json, "delta");
         if (delta) {
             cJSON *stop_reason = cJSON_GetObjectItem(delta, "stop_reason");
             if (stop_reason && stop_reason->valuestring) {
-                // Flush any pending tool call
                 stream_flush_tool(ctx);
                 StreamChunk chunk = {0};
                 chunk.type = CHUNK_DONE;
@@ -403,24 +403,188 @@ static void stream_callback(const char *line, void *userdata) {
             }
         }
     }
-    
+
     cJSON_Delete(json);
 }
 
-static cJSON *build_anthropic_tool(Tool *tool) {
-    cJSON *t = cJSON_CreateObject();
-    cJSON_AddItemToObject(t, "name", cJSON_CreateString(tool->name));
-    cJSON_AddItemToObject(t, "description", cJSON_CreateString(tool->description));
-    if (tool->input_schema) {
-        cJSON_AddItemToObject(t, "input_schema", cJSON_Duplicate(tool->input_schema, 1));
-    } else {
-        cJSON *schema = cJSON_CreateObject();
-        cJSON_AddItemToObject(schema, "type", cJSON_CreateString("object"));
-        cJSON_AddItemToObject(schema, "properties", cJSON_CreateObject());
-        cJSON_AddItemToObject(t, "input_schema", schema);
+// ============================================================================
+// OpenAI streaming parser
+// OpenAI SSE format:
+//   data: {"id":"...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}
+//   data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"name":"Read","arguments":"{\"file_path\":\"..."}}}]}}]}
+//   data: [DONE]
+// ============================================================================
+
+typedef struct {
+    ChunkCallback callback;
+    void *userdata;
+    // OpenAI tool calls use index-based incremental arguments
+    char tool_names[32][256];    // tool call names, indexed by OpenAI's "index"
+    char tool_ids[32][256];      // tool call IDs, indexed by "index"
+    char *tool_args[32];         // accumulated argument strings
+    size_t tool_args_len[32];
+    size_t tool_args_cap[32];
+    int max_tool_index;          // highest index seen so far
+    int done_sent;               // avoid sending DONE twice
+    int non_json_logged;
+} OpenAIStreamContext;
+
+static void openai_stream_context_free(OpenAIStreamContext *ctx) {
+    for (int i = 0; i <= ctx->max_tool_index; i++) {
+        free(ctx->tool_args[i]);
     }
-    return t;
 }
+
+static void openai_stream_flush_tools(OpenAIStreamContext *ctx) {
+    for (int i = 0; i <= ctx->max_tool_index; i++) {
+        if (ctx->tool_ids[i][0] == '\0') continue;  // no tool call at this index
+
+        // Parse accumulated arguments
+        char *input_json = NULL;
+        if (ctx->tool_args[i] && ctx->tool_args_len[i] > 0) {
+            cJSON *parsed = cJSON_Parse(ctx->tool_args[i]);
+            if (parsed) {
+                input_json = cJSON_PrintUnformatted(parsed);
+                cJSON_Delete(parsed);
+            } else {
+                input_json = strdup(ctx->tool_args[i]);  // raw fallback
+            }
+        }
+        if (!input_json) input_json = strdup("{}");
+
+        StreamChunk chunk = {0};
+        chunk.type = CHUNK_TOOL_CALL;
+        chunk.tool_name = ctx->tool_names[i];
+        chunk.tool_id = ctx->tool_ids[i];
+        chunk.tool_input = input_json;
+        ctx->callback(&chunk, ctx->userdata);
+        free(input_json);
+
+        ctx->tool_ids[i][0] = '\0';  // mark as flushed
+    }
+}
+
+// OpenAI SSE stream callback
+static void openai_stream_callback(const char *line, void *userdata) {
+    OpenAIStreamContext *ctx = (OpenAIStreamContext *)userdata;
+    if (!line || *line == '\0') return;
+
+    if (strcmp(line, "[DONE]") == 0) {
+        openai_stream_flush_tools(ctx);
+        if (!ctx->done_sent) {
+            StreamChunk chunk = {0};
+            chunk.type = CHUNK_DONE;
+            ctx->callback(&chunk, ctx->userdata);
+            ctx->done_sent = 1;
+        }
+        return;
+    }
+
+    cJSON *json = cJSON_Parse(line);
+    if (!json) {
+        if (!ctx->non_json_logged && strlen(line) > 10) {
+            DEBUG_LOG("[DEBUG][openai_stream] Non-JSON: %.300s\n", line);
+            ctx->non_json_logged = 1;
+        }
+        return;
+    }
+
+    cJSON *choices = cJSON_GetObjectItem(json, "choices");
+    if (!choices || cJSON_GetArraySize(choices) == 0) { cJSON_Delete(json); return; }
+
+    cJSON *choice = cJSON_GetArrayItem(choices, 0);
+    if (!choice) { cJSON_Delete(json); return; }
+
+    cJSON *delta = cJSON_GetObjectItem(choice, "delta");
+    if (!delta) { cJSON_Delete(json); return; }
+
+    // Text content
+    cJSON *content = cJSON_GetObjectItem(delta, "content");
+    if (content && content->valuestring) {
+        StreamChunk chunk = {0};
+        chunk.type = CHUNK_CONTENT;
+        chunk.content = strdup(content->valuestring);
+        ctx->callback(&chunk, ctx->userdata);
+        free(chunk.content);
+    }
+
+    // Tool calls (OpenAI format: function calls)
+    cJSON *tool_calls = cJSON_GetObjectItem(delta, "tool_calls");
+    if (tool_calls) {
+        int tc_count = cJSON_GetArraySize(tool_calls);
+        for (int i = 0; i < tc_count; i++) {
+            cJSON *tc = cJSON_GetArrayItem(tool_calls, i);
+            if (!tc) continue;
+
+            cJSON *tc_index = cJSON_GetObjectItem(tc, "index");
+            int idx = tc_index ? tc_index->valueint : i;
+            if (idx < 0 || idx >= 32) continue;
+            if (idx > ctx->max_tool_index) ctx->max_tool_index = idx;
+
+            // Capture tool name and id (sent in first chunk of each tool call)
+            cJSON *tc_id = cJSON_GetObjectItem(tc, "id");
+            if (tc_id && tc_id->valuestring && ctx->tool_ids[idx][0] == '\0') {
+                strncpy(ctx->tool_ids[idx], tc_id->valuestring, sizeof(ctx->tool_ids[idx]) - 1);
+            }
+
+            cJSON *fn = cJSON_GetObjectItem(tc, "function");
+            if (fn) {
+                cJSON *fn_name = cJSON_GetObjectItem(fn, "name");
+                if (fn_name && fn_name->valuestring && ctx->tool_names[idx][0] == '\0') {
+                    strncpy(ctx->tool_names[idx], fn_name->valuestring, sizeof(ctx->tool_names[idx]) - 1);
+                }
+
+                // Accumulate arguments (sent incrementally)
+                cJSON *fn_args = cJSON_GetObjectItem(fn, "arguments");
+                if (fn_args && fn_args->valuestring) {
+                    size_t arg_len = strlen(fn_args->valuestring);
+                    size_t needed = ctx->tool_args_len[idx] + arg_len + 1;
+                    if (needed > ctx->tool_args_cap[idx]) {
+                        ctx->tool_args_cap[idx] = needed * 2;
+                        char *new_buf = realloc(ctx->tool_args[idx], ctx->tool_args_cap[idx]);
+                        if (!new_buf) { ctx->tool_args_cap[idx] = needed; continue; }
+                        ctx->tool_args[idx] = new_buf;
+                    }
+                    if (ctx->tool_args[idx] && ctx->tool_args_cap[idx] > ctx->tool_args_len[idx] + arg_len) {
+                        memcpy(ctx->tool_args[idx] + ctx->tool_args_len[idx], fn_args->valuestring, arg_len);
+                        ctx->tool_args_len[idx] += arg_len;
+                        ctx->tool_args[idx][ctx->tool_args_len[idx]] = '\0';
+                    }
+                }
+            }
+        }
+    }
+
+    // Check finish_reason
+    cJSON *finish_reason = cJSON_GetObjectItem(choice, "finish_reason");
+    if (finish_reason && finish_reason->valuestring && strcmp(finish_reason->valuestring, "stop") == 0) {
+        openai_stream_flush_tools(ctx);
+        if (!ctx->done_sent) {
+            StreamChunk chunk = {0};
+            chunk.type = CHUNK_DONE;
+            chunk.stop_reason = strdup("stop");
+            ctx->callback(&chunk, ctx->userdata);
+            free(chunk.stop_reason);
+            ctx->done_sent = 1;
+        }
+    } else if (finish_reason && finish_reason->valuestring && strcmp(finish_reason->valuestring, "tool_calls") == 0) {
+        openai_stream_flush_tools(ctx);
+        if (!ctx->done_sent) {
+            StreamChunk chunk = {0};
+            chunk.type = CHUNK_DONE;
+            chunk.stop_reason = strdup("tool_calls");
+            ctx->callback(&chunk, ctx->userdata);
+            free(chunk.stop_reason);
+            ctx->done_sent = 1;
+        }
+    }
+
+    cJSON_Delete(json);
+}
+
+// ============================================================================
+// Main streaming chat
+// ============================================================================
 
 bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, void *userdata, ToolRegistry *tools, const volatile long *cancelled, const char *system_prompt) {
     if (!p || !messages || !callback) return false;
@@ -437,7 +601,6 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
         cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(p->max_tokens));
         cJSON_AddItemToObject(body, "stream", cJSON_CreateBool(true));
 
-        // Add tools from registry so the model knows what tools are available
         if (tools && tools->count > 0) {
             cJSON *tools_arr = cJSON_CreateArray();
             for (int i = 0; i < tools->count; i++) {
@@ -447,7 +610,6 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
             cJSON_AddItemToObject(body, "tools", tools_arr);
         }
 
-        // Add system prompt
         if (system_prompt && system_prompt[0]) {
             cJSON_AddItemToObject(body, "system", cJSON_CreateString(system_prompt));
         }
@@ -468,11 +630,25 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
         }
     } else {
         // OpenAI format
+        cJSON *msgs = cJSON_Duplicate(messages, 1);
+        if (system_prompt && system_prompt[0]) {
+            msgs = prepend_system_message(msgs, system_prompt);
+        }
+
         cJSON *body = cJSON_CreateObject();
         cJSON_AddItemToObject(body, "model", cJSON_CreateString(p->model));
-        cJSON_AddItemToObject(body, "messages", cJSON_Duplicate(messages, 1));
+        cJSON_AddItemToObject(body, "messages", msgs);
         cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(p->max_tokens));
         cJSON_AddItemToObject(body, "stream", cJSON_CreateBool(true));
+
+        if (tools && tools->count > 0) {
+            cJSON *tools_arr = cJSON_CreateArray();
+            for (int i = 0; i < tools->count; i++) {
+                cJSON *tool_def = build_openai_tool(tools->tools[i]);
+                if (tool_def) cJSON_AddItemToArray(tools_arr, tool_def);
+            }
+            cJSON_AddItemToObject(body, "tools", tools_arr);
+        }
 
         json_body = cJSON_Print(body);
         cJSON_Delete(body);
@@ -493,30 +669,44 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
 
     DEBUG_LOG("[DEBUG][chat_stream] Sending to %s (body_len=%zu)\n", url, strlen(json_body));
 
-    // Dump request body to file for debugging
     {
         FILE *dbg = fopen("debug_request.json", "w");
         if (dbg) { fputs(json_body, dbg); fclose(dbg); }
     }
 
-    StreamContext ctx;
-    ctx.callback = callback;
-    ctx.userdata = userdata;
-    ctx.current_tool_name[0] = '\0';
-    ctx.current_tool_id[0] = '\0';
-    ctx.tool_input_buf = NULL;
-    ctx.tool_input_len = 0;
-    ctx.tool_input_cap = 0;
-    ctx.in_tool_use = 0;
-    ctx.non_json_logged = 0;
+    bool success;
 
-    bool success = http_post_stream(url, headers, json_body, stream_callback, &ctx, 600000, cancelled);
+    if (p->type == PROVIDER_ANTHROPIC) {
+        StreamContext ctx;
+        ctx.callback = callback;
+        ctx.userdata = userdata;
+        ctx.current_tool_name[0] = '\0';
+        ctx.current_tool_id[0] = '\0';
+        ctx.tool_input_buf = NULL;
+        ctx.tool_input_len = 0;
+        ctx.tool_input_cap = 0;
+        ctx.in_tool_use = 0;
+        ctx.non_json_logged = 0;
+
+        success = http_post_stream(url, headers, json_body, anthropic_stream_callback, &ctx, 600000, cancelled);
+        stream_context_free(&ctx);
+    } else {
+        OpenAIStreamContext ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.callback = callback;
+        ctx.userdata = userdata;
+        ctx.max_tool_index = -1;
+        ctx.done_sent = 0;
+        ctx.non_json_logged = 0;
+
+        success = http_post_stream(url, headers, json_body, openai_stream_callback, &ctx, 600000, cancelled);
+        openai_stream_context_free(&ctx);
+    }
 
     if (!success) {
         DEBUG_LOG("[DEBUG][chat_stream] http_post_stream failed\n");
     }
 
-    stream_context_free(&ctx);
     free(json_body);
     return success;
 }
