@@ -4,4 +4,11 @@
 *.bak
 obj/
 deps/cJSON.o
-deps/
+deps/curl/
+deps/openssl-3.3.2/
+deps/openssl-3.3.2.tar.gz
+deps/zlib-1.3.1.tar.gz
+deps/cjson-*/
+deps/.git_nested
+deps/curl/.git_nested
+deps/cJSON/.git_nested
