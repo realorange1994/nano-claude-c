@@ -9,6 +9,10 @@
 #define MAX_TOOL_RESULT_LEN 10000
 #define CHARS_PER_TOKEN 4
 
+// System-injected marker (HTML comment prefix for cache breakpoint avoidance)
+// Matches Go project's SystemInjectedPrefix = "<!-- system-injected -->"
+#define SYSTEM_INJECTED_MARKER "<!-- system-injected -->"
+
 // Entry type - distinguishes different kinds of entries (like miniclaude's EntryType)
 typedef enum {
     ENTRY_MESSAGE,       // Regular message
@@ -92,6 +96,7 @@ void history_add_system(History *h, const char *content);
 
 // Inject or update current time context
 void history_inject_time_context(History *h);
+void history_inject_system(History *h, const char *content);
 
 // ============================================================================
 // Compaction/Summarization (like miniclaude's CompactRun)

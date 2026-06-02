@@ -167,19 +167,59 @@ void history_inject_time_context(History *h) {
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
     char timebuf[128];
-    strftime(timebuf, sizeof(timebuf), "[Current time: %Y-%m-%d %H:%M:%S]", t);
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", t);
 
-    // Update existing time entry if present
+    // Compute timezone offset (like Go's now.Zone())
+    time_t utc = mktime(gmtime(&now));
+    time_t local = mktime(t);
+    int offset = (int)(local - utc);
+    // mktime may adjust t for DST, recalculate
+    offset = (int)((local - utc) / 60 * 60); // round to nearest hour/minute
+    // Simple approach: use _timezone global on Windows
+#ifdef _WIN32
+    offset = -(int)_timezone;
+#else
+    offset = (int)(local - utc);
+#endif
+    int hours = offset / 3600;
+    int minutes = (abs(offset) % 3600) / 60;
+    char sign = offset >= 0 ? '+' : '-';
+    if (hours < 0) hours = -hours;
+
+    char inject_buf[256];
+    snprintf(inject_buf, sizeof(inject_buf),
+        SYSTEM_INJECTED_MARKER "[Current time: %s (UTC%c%02d:%02d)]",
+        timebuf, sign, hours, minutes);
+
+    // Remove previous time-injected entry (like Go replaces the time entry)
     for (int i = h->count - 1; i >= 0; i--) {
-        if (h->entries[i].type == ENTRY_SYSTEM && h->entries[i].content &&
-            strncmp(h->entries[i].content, "[Current time:", 14) == 0) {
+        if (h->entries[i].type == ENTRY_SYSTEM &&
+            h->entries[i].content &&
+            strstr(h->entries[i].content, "[Current time:") != NULL) {
             free(h->entries[i].content);
-            h->entries[i].content = strdup(timebuf);
-            return;
+            // Shift entries down
+            for (int j = i; j < h->count - 1; j++) {
+                h->entries[j] = h->entries[j + 1];
+            }
+            memset(&h->entries[h->count - 1], 0, sizeof(Entry));
+            h->count--;
+            break;
         }
     }
-    // Add new time entry
-    history_add_system(h, timebuf);
+
+    history_inject_system(h, inject_buf);
+}
+
+void history_inject_system(History *h, const char *content) {
+    if (!content || !content[0]) return;
+    if (h->count >= MAX_MESSAGES) return;
+
+    Entry *e = &h->entries[h->count++];
+    memset(e, 0, sizeof(Entry));
+    e->type = ENTRY_SYSTEM;
+    e->role = ROLE_USER;  // Injected content is sent as user message (like Go project)
+    e->content = strdup(content);
+    history_generate_id(e->id, sizeof(e->id));
 }
 
 // ============================================================================
@@ -276,13 +316,33 @@ cJSON *history_to_messages(History *h) {
     while (i < h->count) {
         Entry *e = &h->entries[i];
 
-        // Skip system entries
         if (e->type == ENTRY_SYSTEM) {
-            i++;
-            continue;
-        }
+            // System-injected entries become user messages with single text block
+            // (like Go project's InjectTimeContext, InjectTodoReminder, etc.)
+            // Group consecutive system-injected entries
+            cJSON *msg = cJSON_CreateObject();
+            cJSON_AddItemToObject(msg, "role", cJSON_CreateString("user"));
+            cJSON *content_arr = cJSON_CreateArray();
 
-        if (e->type == ENTRY_TOOL_RESULT) {
+            while (i < h->count && h->entries[i].type == ENTRY_SYSTEM) {
+                Entry *se = &h->entries[i];
+                if (se->content && se->content[0]) {
+                    cJSON *text_block = cJSON_CreateObject();
+                    cJSON_AddItemToObject(text_block, "type", cJSON_CreateString("text"));
+                    cJSON_AddItemToObject(text_block, "text", cJSON_CreateString(se->content));
+                    cJSON_AddItemToArray(content_arr, text_block);
+                }
+                i++;
+            }
+
+            if (cJSON_GetArraySize(content_arr) > 0) {
+                cJSON_AddItemToObject(msg, "content", content_arr);
+                cJSON_AddItemToArray(msgs, msg);
+            } else {
+                cJSON_Delete(content_arr);
+                cJSON_Delete(msg);
+            }
+        } else if (e->type == ENTRY_TOOL_RESULT) {
             // Tool result message - user role with tool_result content blocks
             // Group consecutive tool results into one user message
             cJSON *msg = cJSON_CreateObject();

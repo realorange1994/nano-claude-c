@@ -614,8 +614,27 @@ int repl_run(REPL *repl) {
             // Reset streaming accumulator
             repl_accum_reset(repl);
 
+            // Increment turn counter for idle/todo tracking
+            todo_list_increment_turn();
+
             // Inject current time (like miniclaude's InjectTimeContext)
             history_inject_time_context(&repl->history);
+
+            // Inject todo reminder if there's a todo list
+            {
+                char *reminder = todo_list_build_reminder();
+                if (reminder) {
+                    history_inject_system(&repl->history, reminder);
+                    free(reminder);
+                } else {
+                    // Idle reminder: if model hasn't used TodoWrite for a while
+                    char *idle = todo_list_build_idle_reminder();
+                    if (idle) {
+                        history_inject_system(&repl->history, idle);
+                        free(idle);
+                    }
+                }
+            }
 
             // Get messages for API
             cJSON *messages = history_to_messages(&repl->history);
@@ -675,6 +694,11 @@ int repl_run(REPL *repl) {
 
                 print_tool_action(repl->pending_tool_names[i], args);
                 fflush(stdout);
+
+                // Reset todo write counter when TodoWrite is called
+                if (strcmp(repl->pending_tool_names[i], "TodoWrite") == 0) {
+                    todo_list_reset_write_counter();
+                }
 
                 char *error = NULL;
                 char *result = NULL;

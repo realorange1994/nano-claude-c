@@ -3,6 +3,7 @@
 #include "glob.h"
 #include "calc.h"
 #include "buffer.h"
+#include "history.h"
 #include "compat.h"
 #include <stdlib.h>
 #include <string.h>
@@ -1228,4 +1229,125 @@ char *tool_calc(cJSON *input, char **error) {
         return str;
     }
     return calc_format_result(result);
+}
+
+// ============================================================================
+// TodoWrite tool (like Go project's tools/todo_write.go)
+// ============================================================================
+
+#define MAX_TODOS 64
+
+typedef struct {
+    char content[256];
+    char status[16];    // "pending", "in_progress", "completed"
+    char active_form[128];
+} TodoItem;
+
+typedef struct {
+    TodoItem items[MAX_TODOS];
+    int count;
+    int turns_since_write;
+    int turns_since_remind;
+} TodoList;
+
+static TodoList g_todo_list = {0};
+
+static void todo_list_update(TodoItem *new_items, int new_count) {
+    if (new_count > MAX_TODOS) new_count = MAX_TODOS;
+    memcpy(g_todo_list.items, new_items, new_count * sizeof(TodoItem));
+    g_todo_list.count = new_count;
+    g_todo_list.turns_since_write = 0;
+}
+
+int todo_list_increment_turn(void) {
+    g_todo_list.turns_since_write++;
+    g_todo_list.turns_since_remind++;
+    int should_remind = g_todo_list.turns_since_write >= 10 &&
+                        g_todo_list.turns_since_remind >= 10;
+    if (should_remind) {
+        g_todo_list.turns_since_remind = 0;
+    }
+    return should_remind;
+}
+
+void todo_list_reset_write_counter(void) {
+    g_todo_list.turns_since_write = 0;
+}
+
+char *todo_list_build_reminder(void) {
+    if (g_todo_list.count == 0) return NULL;
+
+    Buffer buf;
+    buffer_init(&buf);
+    buffer_append_str(&buf, SYSTEM_INJECTED_MARKER "\n## Current Tasks\n");
+
+    for (int i = 0; i < g_todo_list.count; i++) {
+        TodoItem *item = &g_todo_list.items[i];
+        const char *icon = "o"; // pending
+        if (strcmp(item->status, "in_progress") == 0) icon = "~";
+        else if (strcmp(item->status, "completed") == 0) icon = "x";
+
+        char line[512];
+        if (item->active_form[0]) {
+            snprintf(line, sizeof(line), "  %s %s (%s) [%s]\n",
+                icon, item->content, item->active_form, item->status);
+        } else {
+            snprintf(line, sizeof(line), "  %s %s [%s]\n",
+                icon, item->content, item->status);
+        }
+        buffer_append_str(&buf, line);
+    }
+
+    buffer_append_str(&buf, "\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.");
+    return buffer_steal(&buf);
+}
+
+char *todo_list_build_idle_reminder(void) {
+    return strdup(SYSTEM_INJECTED_MARKER
+        "The TodoWrite tool hasn't been used recently. "
+        "If you're on tasks that would benefit from tracking progress, "
+        "consider using the TodoWrite tool to update your task list. "
+        "If your current task list is stale, update it. "
+        "If you don't have a task list, create one for multi-step work.");
+}
+
+char *tool_todo_write(cJSON *input, char **error) {
+    (void)error;
+    cJSON *todos = cJSON_GetObjectItem(input, "todos");
+    if (!todos || todos->type != cJSON_Array) {
+        *error = strdup("todos must be an array");
+        return NULL;
+    }
+
+    TodoItem items[MAX_TODOS];
+    int count = 0;
+    int arr_size = cJSON_GetArraySize(todos);
+
+    for (int i = 0; i < arr_size && count < MAX_TODOS; i++) {
+        cJSON *item = cJSON_GetArrayItem(todos, i);
+        cJSON *content = cJSON_GetObjectItem(item, "content");
+        cJSON *status = cJSON_GetObjectItem(item, "status");
+        cJSON *active_form = cJSON_GetObjectItem(item, "activeForm");
+
+        if (!content || !content->valuestring || !status || !status->valuestring) continue;
+
+        // Validate status
+        if (strcmp(status->valuestring, "pending") != 0 &&
+            strcmp(status->valuestring, "in_progress") != 0 &&
+            strcmp(status->valuestring, "completed") != 0) {
+            continue;
+        }
+
+        memset(&items[count], 0, sizeof(TodoItem));
+        strncpy(items[count].content, content->valuestring, sizeof(items[count].content) - 1);
+        strncpy(items[count].status, status->valuestring, sizeof(items[count].status) - 1);
+        if (active_form && active_form->valuestring) {
+            strncpy(items[count].active_form, active_form->valuestring, sizeof(items[count].active_form) - 1);
+        }
+        count++;
+    }
+
+    todo_list_update(items, count);
+
+    return strdup("Todos updated. Ensure that you use the todo list to track your progress. Please proceed with the current tasks as applicable");
 }

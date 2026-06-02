@@ -262,4 +262,46 @@ void tool_register_builtins(ToolRegistry *reg) {
     cJSON_AddItemToObject(calc_schema, "properties", calc_props);
     cJSON *calc_required = cJSON_CreateArray(); cJSON_AddItemToArray(calc_required, cJSON_CreateString("expr")); cJSON_AddItemToObject(calc_schema, "required", calc_required);
     tool_register(reg, "Calc", "Calculate a mathematical expression.", calc_schema, tool_calc);
+
+    // TodoWrite tool
+    cJSON *todo_schema = cJSON_CreateObject();
+    cJSON_AddItemToObject(todo_schema, "type", cJSON_CreateString("object"));
+    cJSON *todo_props = cJSON_CreateObject();
+    cJSON *todos_prop = cJSON_CreateObject();
+    cJSON_AddItemToObject(todos_prop, "type", cJSON_CreateString("array"));
+    cJSON *todo_item = cJSON_CreateObject();
+    cJSON_AddItemToObject(todo_item, "type", cJSON_CreateString("object"));
+    cJSON *todo_item_props = cJSON_CreateObject();
+    cJSON *ti_content = cJSON_CreateObject(); cJSON_AddItemToObject(ti_content, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(ti_content, "description", cJSON_CreateString("Task description in imperative form")); cJSON_AddItemToObject(todo_item_props, "content", ti_content);
+    cJSON *ti_status = cJSON_CreateObject(); cJSON_AddItemToObject(ti_status, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(ti_status, "description", cJSON_CreateString("Current task status")); cJSON *ti_enum = cJSON_CreateArray(); cJSON_AddItemToArray(ti_enum, cJSON_CreateString("pending")); cJSON_AddItemToArray(ti_enum, cJSON_CreateString("in_progress")); cJSON_AddItemToArray(ti_enum, cJSON_CreateString("completed")); cJSON_AddItemToObject(ti_status, "enum", ti_enum); cJSON_AddItemToObject(todo_item_props, "status", ti_status);
+    cJSON *ti_active = cJSON_CreateObject(); cJSON_AddItemToObject(ti_active, "type", cJSON_CreateString("string")); cJSON_AddItemToObject(ti_active, "description", cJSON_CreateString("Present continuous form for display")); cJSON_AddItemToObject(todo_item_props, "activeForm", ti_active);
+    cJSON_AddItemToObject(todo_item, "properties", todo_item_props);
+    cJSON *todo_item_required = cJSON_CreateArray(); cJSON_AddItemToArray(todo_item_required, cJSON_CreateString("content")); cJSON_AddItemToArray(todo_item_required, cJSON_CreateString("status")); cJSON_AddItemToObject(todo_item, "required", todo_item_required);
+    cJSON_AddItemToObject(todos_prop, "items", todo_item);
+    cJSON_AddItemToObject(todos_prop, "description", cJSON_CreateString("Complete list of tasks (replaces previous list)"));
+    cJSON_AddItemToObject(todo_props, "todos", todos_prop);
+    cJSON_AddItemToObject(todo_schema, "properties", todo_props);
+    cJSON *todo_required = cJSON_CreateArray(); cJSON_AddItemToArray(todo_required, cJSON_CreateString("todos")); cJSON_AddItemToObject(todo_schema, "required", todo_required);
+    tool_register(reg, "TodoWrite",
+        "Update the todo list for the current session. To be used proactively and often to track progress and pending tasks. "
+        "Make sure that at least one task is in_progress at all times. "
+        "Always provide both content and activeForm for each task. "
+        "## When to Use This Tool\n"
+        "1. Complex multi-step tasks - When a task requires 3 or more distinct steps\n"
+        "2. Non-trivial and complex tasks - Tasks that require careful planning\n"
+        "3. User explicitly requests todo list\n"
+        "4. User provides multiple tasks\n"
+        "5. After receiving new instructions - Immediately capture requirements\n"
+        "6. When you start working on a task - Mark as in_progress (limit ONE at a time)\n"
+        "7. After completing a task - Mark as completed\n\n"
+        "## When NOT to Use This Tool\n"
+        "1. Only a single, straightforward task\n"
+        "2. The task is trivial (less than 3 steps)\n"
+        "3. Purely conversational or informational\n\n"
+        "## Task States\n"
+        "1. pending - Not yet started\n"
+        "2. in_progress - Currently working on (limit ONE)\n"
+        "3. completed - Task finished\n\n"
+        "When in doubt, use this tool.",
+        todo_schema, tool_todo_write);
 }

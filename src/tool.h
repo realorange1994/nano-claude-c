@@ -77,6 +77,13 @@ char *tool_grep(cJSON *input, char **error);
 char *tool_glob(cJSON *input, char **error);
 char *tool_exec(cJSON *input, char **error);
 char *tool_calc(cJSON *input, char **error);
+char *tool_todo_write(cJSON *input, char **error);
+
+// Todo list accessors for REPL injection
+int todo_list_increment_turn(void);
+void todo_list_reset_write_counter(void);
+char *todo_list_build_reminder(void);
+char *todo_list_build_idle_reminder(void);
 
 // Register all built-in tools
 void tool_register_builtins(ToolRegistry *reg);
