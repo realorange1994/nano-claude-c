@@ -4,7 +4,7 @@ CC = /home/work/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc
 CFLAGS = -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -Wno-stringop-truncation -O2
 LDFLAGS = -static
 
-SRCS = src/main.c src/http.c src/buffer.c src/config.c src/history.c src/provider.c src/calc.c src/glob.c src/rgrep.c src/tool.c src/tool_impl.c src/jsonrpc.c src/repl.c deps/cJSON/cJSON.c
+SRCS = src/main.c src/http.c src/buffer.c src/config.c src/history.c src/provider.c src/calc.c src/glob.c src/rgrep.c src/tool.c src/tool_impl.c src/jsonrpc.c src/repl.c src/system_prompt.c deps/cJSON/cJSON.c
 OBJS = $(SRCS:.c=.o)
 
 CFLAGS += -Ideps/cJSON -Isrc -Ideps/curl-install/include -Ideps/openssl-install/include
