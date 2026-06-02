@@ -141,7 +141,6 @@ static cJSON *convert_to_openai_messages(cJSON *anthropic_msgs) {
                         cJSON_AddItemToObject(tc, "id",
                             id ? cJSON_CreateString(id->valuestring) : cJSON_CreateString(""));
                         cJSON_AddItemToObject(tc, "type", cJSON_CreateString("function"));
-                        cJSON_AddItemToObject(tc, "index", cJSON_CreateNumber(tool_calls->child ? cJSON_GetArraySize(tool_calls) : 0));
 
                         cJSON *fn = cJSON_CreateObject();
                         cJSON_AddItemToObject(fn, "name",
