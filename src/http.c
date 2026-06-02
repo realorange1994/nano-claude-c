@@ -1,6 +1,7 @@
 #ifdef _MSC_VER
 #pragma warning(disable:4819)
 #endif
+#include "config.h"
 #include "http.h"
 #include "buffer.h"
 #include "compat.h"
@@ -199,21 +200,52 @@ char *http_post(const char *url, const char *headers_str, const char *body, int 
     int port = 443;
     char path[1024] = {0};
 
-    if (sscanf(url, "%15[^://]://%255[^:/]:%d/%1023[^\n]", scheme, host, &port, path) != 4) {
-        if (sscanf(url, "%15[^://]://%255[^/\n]", scheme, host) >= 2) {
-            port = 443;
-            strcpy(path, "/");
-        } else {
-            fprintf(stderr, "[DEBUG][http_post] URL parsing failed: %s\n", url);
-            return NULL;
-        }
+    // Parse URL: scheme://host[:port]/path
+    const char *slash_slash = strstr(url, "://");
+    if (!slash_slash) {
+        DEBUG_LOG("[DEBUG][http_post] Invalid URL (no ://): %s\n", url);
+        return NULL;
     }
 
+    size_t scheme_len = (size_t)(slash_slash - url);
+    if (scheme_len > 15) scheme_len = 15;
+    strncpy(scheme, url, scheme_len);
+    scheme[scheme_len] = '\0';
+
+    const char *host_start = slash_slash + 3;
+    const char *path_start = strchr(host_start, '/');
+    const char *colon = strchr(host_start, ':');
+
     int use_ssl = (strcmp(scheme, "https") == 0) ? 1 : 0;
+
+    if (path_start) {
+        size_t host_len = (size_t)(path_start - host_start);
+        if (colon && colon < path_start) {
+            host_len = (size_t)(colon - host_start);
+            port = atoi(colon + 1);
+            if (port == 0) port = use_ssl ? 443 : 80;
+        }
+        if (host_len > 255) host_len = 255;
+        strncpy(host, host_start, host_len);
+        host[host_len] = '\0';
+        strncpy(path, path_start, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    } else {
+        size_t host_len = strlen(host_start);
+        if (colon) {
+            host_len = (size_t)(colon - host_start);
+            port = atoi(colon + 1);
+            if (port == 0) port = use_ssl ? 443 : 80;
+        }
+        if (host_len > 255) host_len = 255;
+        strncpy(host, host_start, host_len);
+        host[host_len] = '\0';
+        strcpy(path, "/");
+    }
+
     if (port == 0) port = use_ssl ? 443 : 80;
 
-    fprintf(stderr, "[DEBUG][http_post] Connecting to %s:%d (%s)\n", host, port, scheme);
-    fflush(stderr);
+    DEBUG_LOG("[DEBUG][http_post] Connecting to %s:%d%s (%s)\n", host, port, path, scheme);
 
     wchar_t *w_host = utf8_to_wide(host);
     wchar_t *w_path = utf8_to_wide(path);
@@ -265,7 +297,7 @@ char *http_post(const char *url, const char *headers_str, const char *body, int 
             chunk[bytes_read] = '\0';
             buffer_append(&buf, chunk, bytes_read);
         }
-        fprintf(stderr, "[DEBUG][http_post] Error response: %s\n", buffer_c_str(&buf));
+        DEBUG_LOG("[DEBUG][http_post] Error response: %s\n", buffer_c_str(&buf));
         buffer_free(&buf);
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
         return NULL;
@@ -336,7 +368,7 @@ char *http_post(const char *url, const char *headers_str, const char *body, int 
 
     if (res != CURLE_OK || http_code != 200) {
         if (res != CURLE_OK)
-            fprintf(stderr, "[DEBUG][http_post] curl error: %s\n", curl_easy_strerror(res));
+            DEBUG_LOG("[DEBUG][http_post] curl error: %s\n", curl_easy_strerror(res));
         mb_free(&resp);
         return NULL;
     }
@@ -435,7 +467,19 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
     DWORD size = sizeof(status_code);
     WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status_code, &size, NULL);
 
-    if (status_code != 200) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+    if (status_code != 200) {
+        // Read error response body
+        Buffer buf; buffer_init(&buf);
+        char echunk[4096]; DWORD ebytes_read;
+        while (WinHttpReadData(hRequest, echunk, sizeof(echunk) - 1, &ebytes_read) && ebytes_read > 0) {
+            echunk[ebytes_read] = '\0';
+            buffer_append(&buf, echunk, ebytes_read);
+        }
+        DEBUG_LOG("[DEBUG][http_post_stream] HTTP %lu error response: %s\n", status_code, buffer_c_str(&buf));
+        buffer_free(&buf);
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+        return false;
+    }
 
     char chunk[4096];
     char *line_buf = NULL;
@@ -543,10 +587,10 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
 
     if (res != CURLE_OK || http_code != 200) {
         if (res != CURLE_OK)
-            fprintf(stderr, "[DEBUG][http_post_stream] curl_easy_perform: res=%d (%s) http=%ld\n",
+            DEBUG_LOG("[DEBUG][http_post_stream] curl_easy_perform: res=%d (%s) http=%ld\n",
                     (int)res, curl_easy_strerror(res), http_code);
         else
-            fprintf(stderr, "[DEBUG][http_post_stream] http_code=%ld (expected 200)\n", http_code);
+            DEBUG_LOG("[DEBUG][http_post_stream] http_code=%ld (expected 200)\n", http_code);
         sse_ctx_free(&sse);
         return false;
     }

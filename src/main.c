@@ -61,6 +61,8 @@ static void print_help(const char *prog) {
     printf("  %s --api-key sk-ant-...\n", prog);
 }
 
+int g_verbose = 0;  // Global verbose flag, set by -v
+
 int main(int argc, char *argv[]) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(global_crash_handler);
@@ -97,6 +99,8 @@ int main(int argc, char *argv[]) {
             if (i + 1 < argc) base_url_override = argv[++i];
         } else if (strcmp(argv[i], "--max-tokens") == 0) {
             if (i + 1 < argc) max_tokens_override = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
+            g_verbose = 1;
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             print_help(argv[0]);

@@ -1,3 +1,4 @@
+#include "config.h"
 #include "history.h"
 #include "buffer.h"
 #include <stdlib.h>
@@ -374,6 +375,31 @@ cJSON *history_to_messages(History *h) {
         }
     }
 
+    // Log message summary for debugging
+    int msg_count = cJSON_GetArraySize(msgs);
+    DEBUG_LOG("[DEBUG][to_messages] %d entries -> %d messages\n", h->count, msg_count);
+    for (int mi = 0; mi < msg_count && mi < 30; mi++) {
+        cJSON *m = cJSON_GetArrayItem(msgs, mi);
+        const char *role = cJSON_GetObjectItem(m, "role") ? cJSON_GetObjectItem(m, "role")->valuestring : "?";
+        cJSON *content = cJSON_GetObjectItem(m, "content");
+        if (content && content->type == cJSON_Array) {
+            int blocks = cJSON_GetArraySize(content);
+            DEBUG_LOG("  msg[%d]: role=%s, content_blocks=%d\n", mi, role, blocks);
+            for (int bi = 0; bi < blocks && bi < 5; bi++) {
+                cJSON *block = cJSON_GetArrayItem(content, bi);
+                const char *btype = cJSON_GetObjectItem(block, "type") ? cJSON_GetObjectItem(block, "type")->valuestring : "?";
+                const char *bname = cJSON_GetObjectItem(block, "name") ? cJSON_GetObjectItem(block, "name")->valuestring : "";
+                const char *bid = cJSON_GetObjectItem(block, "tool_use_id") ? cJSON_GetObjectItem(block, "tool_use_id")->valuestring : "";
+                const char *tid = cJSON_GetObjectItem(block, "id") ? cJSON_GetObjectItem(block, "id")->valuestring : "";
+                DEBUG_LOG("    block[%d]: type=%s name=%s id=%s tool_use_id=%s\n", bi, btype, bname, tid, bid);
+            }
+        } else if (content && content->valuestring) {
+            DEBUG_LOG("  msg[%d]: role=%s, text_len=%zu\n", mi, role, strlen(content->valuestring));
+        } else {
+            DEBUG_LOG("  msg[%d]: role=%s, (empty)\n", mi, role);
+        }
+    }
+
     return msgs;
 }
 
@@ -443,9 +469,11 @@ int history_find_cut_point(History *h) {
     return 0;
 }
 
-// Remove orphaned tool results whose tool call was cut away
+// Remove orphaned tool results whose tool call was cut away,
+// AND orphaned tool calls whose result was cut away.
+// Anthropic API requires every tool_use to have a matching tool_result and vice versa.
 static void remove_orphaned_tool_results(History *h) {
-    // Build set of valid tool call IDs
+    // Build set of valid tool call IDs (assistant entries with tool_name)
     int valid_count = 0;
     char valid_ids[MAX_CUT_POINTS][64];
     for (int i = 0; i < h->count && valid_count < MAX_CUT_POINTS; i++) {
@@ -457,12 +485,36 @@ static void remove_orphaned_tool_results(History *h) {
         }
     }
 
-    // Compact out orphaned tool results
+    // Build set of tool_result parent IDs (which tool_use IDs have results)
+    int result_count = 0;
+    char result_ids[MAX_CUT_POINTS][64];
+    for (int i = 0; i < h->count && result_count < MAX_CUT_POINTS; i++) {
+        Entry *e = &h->entries[i];
+        if (e->type == ENTRY_TOOL_RESULT && e->parent_id[0]) {
+            strncpy(result_ids[result_count], e->parent_id, 63);
+            result_ids[result_count][63] = '\0';
+            result_count++;
+        }
+    }
+
+    DEBUG_LOG("[DEBUG][remove_orphans] entries=%d valid_tool_use=%d valid_tool_result=%d\n",
+        h->count, valid_count, result_count);
+    for (int i = 0; i < h->count && i < 30; i++) {
+        Entry *e = &h->entries[i];
+        DEBUG_LOG("  [%d] type=%d role=%d tool_name=%s parent_id=%s id=%s\n",
+            i, e->type, e->role,
+            e->tool_name ? e->tool_name : "(null)",
+            e->parent_id[0] ? e->parent_id : "(empty)",
+            e->id[0] ? e->id : "(empty)");
+    }
+
+    // Compact out orphaned entries
     int write = 0;
+    int removed_results = 0, removed_uses = 0;
     for (int read = 0; read < h->count; read++) {
         Entry *e = &h->entries[read];
         if (e->type == ENTRY_TOOL_RESULT) {
-            // Check if parent_id matches any valid tool call ID
+            // Orphaned tool_result: no matching tool_use
             int found = 0;
             for (int v = 0; v < valid_count; v++) {
                 if (strcmp(e->parent_id, valid_ids[v]) == 0) {
@@ -470,10 +522,28 @@ static void remove_orphaned_tool_results(History *h) {
                 }
             }
             if (!found) {
-                // Orphaned - free and skip
+                DEBUG_LOG("  [ORPHAN] removing tool_result idx=%d parent_id=%s\n", read, e->parent_id);
                 free(e->content);
                 free(e->tool_name);
                 free(e->tool_result);
+                removed_results++;
+                continue;
+            }
+        } else if (e->type == ENTRY_MESSAGE && e->role == ROLE_ASSISTANT && e->tool_name && e->tool_name[0]) {
+            // Orphaned tool_use: no matching tool_result
+            const char *tid = e->parent_id[0] ? e->parent_id : e->id;
+            int found = 0;
+            for (int v = 0; v < result_count; v++) {
+                if (strcmp(tid, result_ids[v]) == 0) {
+                    found = 1; break;
+                }
+            }
+            if (!found) {
+                DEBUG_LOG("  [ORPHAN] removing tool_use idx=%d tool=%s tid=%s\n", read, e->tool_name, tid);
+                free(e->content);
+                free(e->tool_name);
+                free(e->tool_result);
+                removed_uses++;
                 continue;
             }
         }
@@ -487,10 +557,16 @@ static void remove_orphaned_tool_results(History *h) {
         memset(&h->entries[i], 0, sizeof(Entry));
     }
     h->count = write;
+
+    DEBUG_LOG("[DEBUG][remove_orphans] removed %d tool_results, %d tool_uses, remaining=%d\n",
+        removed_results, removed_uses, h->count);
 }
 
 void history_compact(History *h, char *(*summarize_fn)(const char *)) {
-    if (h->count == 0) return;
+    if (!h) { DEBUG_LOG("[DEBUG][compact] history is NULL\n"); return; }
+    if (h->count == 0) { DEBUG_LOG("[DEBUG][compact] history count is 0\n"); return; }
+
+    DEBUG_LOG("[DEBUG][compact] Starting compaction, entries=%d\n", h->count);
 
     // Build old content for summarization (entries before cut)
     Buffer old_content;
@@ -510,8 +586,12 @@ void history_compact(History *h, char *(*summarize_fn)(const char *)) {
         }
     }
 
+    DEBUG_LOG("[DEBUG][compact] Built old_content, len=%zu\n", buffer_len(&old_content));
+
     char *summary = (*summarize_fn)(buffer_c_str(&old_content));
     buffer_free(&old_content);
+
+    DEBUG_LOG("[DEBUG][compact] summarize_fn returned: %s\n", summary ? "summary" : "NULL");
 
     if (!summary || !summary[0]) {
         free(summary);
@@ -523,10 +603,14 @@ void history_compact(History *h, char *(*summarize_fn)(const char *)) {
     free(h->summary);
     h->summary = summary;
 
+    DEBUG_LOG("[DEBUG][compact] Summary stored, len=%zu\n", strlen(summary));
+
     // Find cut point
     int cut_index = history_find_cut_point(h);
+    DEBUG_LOG("[DEBUG][compact] cut_index=%d count=%d\n", cut_index, h->count);
+
     if (cut_index >= h->count) cut_index = h->count - 1;
-    if (cut_index == 0) return; // Nothing to compact
+    if (cut_index == 0) { DEBUG_LOG("[DEBUG][compact] cut_index==0, nothing to compact\n"); return; }
 
     // Keep only entries after the cut
     int keep_count = h->count - cut_index;
@@ -569,15 +653,25 @@ void history_compact(History *h, char *(*summarize_fn)(const char *)) {
         }
     }
 
-    // Update parent IDs for kept entries
+    // Update parent IDs for kept entries (only for non-tool entries)
+    // DO NOT overwrite tool_use parent_id - it stores the original tool call ID from API
+    // DO NOT overwrite tool_result parent_id - it stores the tool_use_id it responds to
     for (int i = 0; i < h->count; i++) {
+        Entry *e = &h->entries[i];
+        // Skip tool_use entries (assistant with tool_name) - they need their original tool call ID
+        if (e->type == ENTRY_MESSAGE && e->role == ROLE_ASSISTANT && e->tool_name && e->tool_name[0]) {
+            continue;
+        }
+        // Skip tool_result entries - they need their original tool_use_id
+        if (e->type == ENTRY_TOOL_RESULT) {
+            continue;
+        }
+        // Only update parent_id for regular messages (link to previous entry)
         if (i == 0) {
-            h->entries[i].parent_id[0] = '\0';
+            e->parent_id[0] = '\0';
         } else {
-            if (h->entries[i].type != ENTRY_TOOL_RESULT) {
-                strncpy(h->entries[i].parent_id, h->entries[i - 1].id, sizeof(h->entries[i].parent_id) - 1);
-                h->entries[i].parent_id[sizeof(h->entries[i].parent_id) - 1] = '\0';
-            }
+            strncpy(e->parent_id, h->entries[i - 1].id, sizeof(e->parent_id) - 1);
+            e->parent_id[sizeof(e->parent_id) - 1] = '\0';
         }
     }
 

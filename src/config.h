@@ -2,6 +2,8 @@
 #define CONFIG_H
 
 #include <stdbool.h>
+#include <stdio.h>
+#include <stdarg.h>
 
 #define MAX_MCP_SERVERS 16
 #define MAX_PATH_LEN 1024
@@ -26,6 +28,11 @@ typedef struct {
 
 // Global config
 extern Config g_config;
+
+// Global verbose flag (-v)
+extern int g_verbose;
+
+#define DEBUG_LOG(fmt, ...) do { if (g_verbose) { fprintf(stderr, fmt, __VA_ARGS__); fflush(stderr); } } while(0)
 
 // Load config from file
 bool config_load(const char *path);

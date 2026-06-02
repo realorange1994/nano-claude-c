@@ -2,6 +2,7 @@
 #define PROVIDER_H
 
 #include <stdbool.h>
+#include "config.h"
 #include "cJSON.h"
 
 typedef enum {

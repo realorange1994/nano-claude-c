@@ -401,23 +401,68 @@ static void stream_callback(const StreamChunk *chunk, void *userdata) {
 // Compaction (like miniclaude's runCompaction)
 // ============================================================================
 
+typedef struct {
+    char *buf;
+    size_t len;
+    size_t cap;
+    int done;
+} SummaryCollector;
+
+static void collect_summary_chunk(const StreamChunk *chunk, void *userdata) {
+    SummaryCollector *c = (SummaryCollector *)userdata;
+    if (chunk->type == CHUNK_CONTENT && chunk->content) {
+        size_t clen = strlen(chunk->content);
+        if (c->len + clen + 1 > c->cap) {
+            c->cap = (c->len + clen + 1) * 2;
+            char *new_buf = realloc(c->buf, c->cap);
+            if (!new_buf) return;
+            c->buf = new_buf;
+        }
+        memcpy(c->buf + c->len, chunk->content, clen);
+        c->len += clen;
+        c->buf[c->len] = '\0';
+    } else if (chunk->type == CHUNK_DONE) {
+        c->done = 1;
+    }
+}
+
 static char *repl_summarize_callback(const char *history_text) {
+    DEBUG_LOG("[DEBUG][summarize] Starting summarization, text_len=%zu\n", history_text ? strlen(history_text) : 0);
+
     const char *prompt_template = history_get_summarization_prompt();
     char *prompt = malloc(strlen(history_text) + strlen(prompt_template) + 200);
-    if (!prompt) return NULL;
+    if (!prompt) {
+    DEBUG_LOG("[DEBUG][summarize] malloc failed for prompt\n");
+        return NULL;
+    }
     sprintf(prompt, "%s\n\n%s", prompt_template, history_text);
 
     cJSON *messages = cJSON_CreateArray();
-    if (!messages) { free(prompt); return NULL; }
+    if (!messages) { free(prompt); DEBUG_LOG("[DEBUG][summarize] cJSON_CreateArray failed\n"); return NULL; }
     cJSON *msg = cJSON_CreateObject();
-    if (!msg) { cJSON_Delete(messages); free(prompt); return NULL; }
+    if (!msg) { cJSON_Delete(messages); free(prompt); DEBUG_LOG("[DEBUG][summarize] cJSON_CreateObject failed\n"); return NULL; }
     cJSON_AddItemToObject(msg, "role", cJSON_CreateString("user"));
     cJSON_AddItemToObject(msg, "content", cJSON_CreateString(prompt));
     cJSON_AddItemToArray(messages, msg);
     free(prompt);
 
-    char *summary = provider_chat_sync(g_repl->provider, messages, 8192);
+    // Use streaming (like miniclaude) - sync mode is rejected by some proxies
+    SummaryCollector sc = { NULL, 0, 0, 0 };
+    long not_cancelled = 0;
+    bool success = provider_chat_stream(g_repl->provider, messages, collect_summary_chunk, &sc, NULL, &not_cancelled);
     cJSON_Delete(messages);
+
+    char *summary = NULL;
+    if (success && sc.done && sc.buf && sc.len > 0) {
+        summary = sc.buf;
+    } else {
+        free(sc.buf);
+        summary = NULL;
+    }
+
+    DEBUG_LOG("[DEBUG][summarize] Result: %s (len=%zu)\n",
+        summary ? "got summary" : "NULL", summary ? strlen(summary) : 0);
+
     return summary;
 }
 

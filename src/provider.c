@@ -160,6 +160,7 @@ typedef struct {
     size_t tool_input_len;     // Current length of tool input
     size_t tool_input_cap;     // Capacity of tool input buffer
     int in_tool_use;
+    int non_json_logged;       // Debug: track non-JSON lines
 } StreamContext;
 
 static void stream_context_free(StreamContext *ctx) {
@@ -338,22 +339,25 @@ static void stream_handle_content_block_end(cJSON *block, StreamContext *ctx) {
 
 static void stream_callback(const char *line, void *userdata) {
     StreamContext *ctx = (StreamContext *)userdata;
-    
+
     // Skip empty lines
     if (!line || *line == '\0') return;
-    
+
     // Handle [DONE] marker
     if (strcmp(line, "[DONE]") == 0) {
-        // Flush any pending tool call
         stream_flush_tool(ctx);
         StreamChunk chunk = {0};
         chunk.type = CHUNK_DONE;
         ctx->callback(&chunk, ctx->userdata);
         return;
     }
-    
+
     cJSON *json = cJSON_Parse(line);
     if (!json) {
+        if (!ctx->non_json_logged && strlen(line) > 10) {
+            DEBUG_LOG("[DEBUG][stream_callback] Non-JSON response: %.300s\n", line);
+            ctx->non_json_logged = 1;
+        }
         return;
     }
     
@@ -475,7 +479,15 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
     }
 
     if (!json_body) return false;
-    
+
+    DEBUG_LOG("[DEBUG][chat_stream] Sending to %s (body_len=%zu)\n", url, strlen(json_body));
+
+    // Dump request body to file for debugging
+    {
+        FILE *dbg = fopen("debug_request.json", "w");
+        if (dbg) { fputs(json_body, dbg); fclose(dbg); }
+    }
+
     StreamContext ctx;
     ctx.callback = callback;
     ctx.userdata = userdata;
@@ -485,8 +497,13 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
     ctx.tool_input_len = 0;
     ctx.tool_input_cap = 0;
     ctx.in_tool_use = 0;
+    ctx.non_json_logged = 0;
 
     bool success = http_post_stream(url, headers, json_body, stream_callback, &ctx, 600000, cancelled);
+
+    if (!success) {
+        DEBUG_LOG("[DEBUG][chat_stream] http_post_stream failed\n");
+    }
 
     stream_context_free(&ctx);
     free(json_body);
