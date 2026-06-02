@@ -523,16 +523,16 @@ bool http_post_stream(const char *url, const char *headers_str, const char *body
     if (hdrs) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_sse_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sse);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long)timeout_ms);
+    // For streaming: use low-speed detection instead of hard total timeout
+    // A hard total timeout would kill ongoing streams mid-response
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 30000L);  // 30s connect timeout
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);        // abort if < 1 byte/s
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);       // ...for 120s straight
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     // Disable progress bar and signals for clean SSE streaming
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    // Low-speed detection: abort if < 1 byte/s for 120s (catches dead connections)
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
 
     long http_code = 0;
     CURLcode res = curl_easy_perform(curl);
