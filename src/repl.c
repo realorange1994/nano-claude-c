@@ -1,5 +1,6 @@
 #include "repl.h"
 #include "config.h"
+#include "system_prompt.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -449,7 +450,7 @@ static char *repl_summarize_callback(const char *history_text) {
     // Use streaming (like miniclaude) - sync mode is rejected by some proxies
     SummaryCollector sc = { NULL, 0, 0, 0 };
     long not_cancelled = 0;
-    bool success = provider_chat_stream(g_repl->provider, messages, collect_summary_chunk, &sc, NULL, &not_cancelled);
+    bool success = provider_chat_stream(g_repl->provider, messages, collect_summary_chunk, &sc, NULL, &not_cancelled, NULL);
     cJSON_Delete(messages);
 
     char *summary = NULL;
@@ -544,6 +545,10 @@ int repl_run(REPL *repl) {
 #else
     signal(SIGINT, console_signal_handler);
 #endif
+
+    // Build system prompt once (reuse across all iterations)
+    const char *model_name = provider_model(repl->provider);
+    char *system_prompt = system_prompt_build(repl->tools, model_name, "auto", NULL);
 
     printf("NanoClaude-C (Pure C AI Agent)\n");
     printf("Type '/help' for commands, '/quit' to exit, Ctrl+C to interrupt\n\n");
@@ -640,7 +645,7 @@ int repl_run(REPL *repl) {
             cJSON *messages = history_to_messages(&repl->history);
 
             // Stream chat
-            bool success = provider_chat_stream(repl->provider, messages, stream_callback, repl, repl->tools, &repl->cancelled);
+            bool success = provider_chat_stream(repl->provider, messages, stream_callback, repl, repl->tools, &repl->cancelled, system_prompt);
             cJSON_Delete(messages);
 
             // Check if interrupted during streaming
@@ -768,6 +773,8 @@ int repl_run(REPL *repl) {
 #else
     signal(SIGINT, SIG_DFL);
 #endif
+
+    system_prompt_free(system_prompt);
 
     return 0;
 }

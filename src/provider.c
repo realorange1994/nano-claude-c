@@ -49,15 +49,15 @@ ProviderType provider_type(Provider *p) {
     return p->type;
 }
 
-char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override) {
+char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, const char *system_prompt) {
     if (!p || !messages) return NULL;
 
     int max_tokens = max_tokens_override > 0 ? max_tokens_override : p->max_tokens;
-    
+
     char *json_body = NULL;
     char headers[1024];
     char url[512];
-    
+
     if (p->type == PROVIDER_ANTHROPIC) {
         // Anthropic format
         cJSON *body = cJSON_CreateObject();
@@ -65,7 +65,10 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override) 
         cJSON_AddItemToObject(body, "messages", cJSON_Duplicate(messages, 1));
         cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(max_tokens));
         cJSON_AddItemToObject(body, "stream", cJSON_CreateBool(false));
-        
+        if (system_prompt && system_prompt[0]) {
+            cJSON_AddItemToObject(body, "system", cJSON_CreateString(system_prompt));
+        }
+
         json_body = cJSON_Print(body);
         cJSON_Delete(body);
         
@@ -87,6 +90,9 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override) 
         cJSON_AddItemToObject(body, "messages", cJSON_Duplicate(messages, 1));
         cJSON_AddItemToObject(body, "max_tokens", cJSON_CreateNumber(max_tokens));
         cJSON_AddItemToObject(body, "stream", cJSON_CreateBool(false));
+        if (system_prompt && system_prompt[0]) {
+            cJSON_AddItemToObject(body, "system", cJSON_CreateString(system_prompt));
+        }
         
         json_body = cJSON_Print(body);
         cJSON_Delete(body);
@@ -416,7 +422,7 @@ static cJSON *build_anthropic_tool(Tool *tool) {
     return t;
 }
 
-bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, void *userdata, ToolRegistry *tools, const volatile long *cancelled) {
+bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, void *userdata, ToolRegistry *tools, const volatile long *cancelled, const char *system_prompt) {
     if (!p || !messages || !callback) return false;
 
     char *json_body = NULL;
@@ -439,6 +445,11 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
                 if (tool_def) cJSON_AddItemToArray(tools_arr, tool_def);
             }
             cJSON_AddItemToObject(body, "tools", tools_arr);
+        }
+
+        // Add system prompt
+        if (system_prompt && system_prompt[0]) {
+            cJSON_AddItemToObject(body, "system", cJSON_CreateString(system_prompt));
         }
 
         json_body = cJSON_Print(body);

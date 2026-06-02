@@ -37,11 +37,11 @@ typedef struct ToolRegistry ToolRegistry;
 // Streaming chat
 typedef void (*ChunkCallback)(const StreamChunk *chunk, void *userdata);
 // cancelled: if non-NULL, checked during streaming for Ctrl+C cancellation
-bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, void *userdata, ToolRegistry *tools, const volatile long *cancelled);
+bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, void *userdata, ToolRegistry *tools, const volatile long *cancelled, const char *system_prompt);
 
 // Synchronous chat (for compact summary)
 // max_tokens_override: if > 0, use this instead of provider's default max_tokens
-char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override);
+char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, const char *system_prompt);
 
 void provider_set_max_tokens(Provider *p, int max_tokens);
 const char *provider_model(Provider *p);
