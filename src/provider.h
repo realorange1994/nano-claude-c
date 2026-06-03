@@ -50,4 +50,7 @@ ProviderType provider_type(Provider *p);
 void provider_reset_retry_state(Provider *p);
 void provider_reset_stream_failure(Provider *p);
 
+// Get last error details for display to user
+void provider_get_last_error(Provider *p, int *http_status, char *error_msg, size_t error_msg_size);
+
 #endif // PROVIDER_H

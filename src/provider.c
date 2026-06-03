@@ -97,6 +97,15 @@ void provider_reset_stream_failure(Provider *p) {
     if (p) retry_state_stream_success(&p->retry_state);
 }
 
+void provider_get_last_error(Provider *p, int *http_status, char *error_msg, size_t error_msg_size) {
+    if (!p || !http_status || !error_msg) return;
+    *http_status = p->retry_state.last_error_status;
+    if (error_msg && error_msg_size > 0) {
+        strncpy(error_msg, p->retry_state.last_error, error_msg_size - 1);
+        error_msg[error_msg_size - 1] = '\0';
+    }
+}
+
 // ============================================================================
 // Message format conversion: Anthropic-style -> OpenAI-style
 // history_to_messages() produces Anthropic format (tool_use/tool_result content blocks).
