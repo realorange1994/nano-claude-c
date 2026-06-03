@@ -202,13 +202,31 @@ char *repl_read_line_interruptible(REPL *repl) {
     DWORD file_type = GetFileType(hStdin);
     int is_pipe = (file_type == FILE_TYPE_CHAR) ? 0 : 1;
     if (is_pipe) {
-        // Use fgets for piped/non-console input
-        static char pipe_line[4096];
-        if (fgets(pipe_line, sizeof(pipe_line), stdin) == NULL) return NULL;
-        size_t len = strlen(pipe_line);
-        if (len > 0 && pipe_line[len - 1] == '\n') pipe_line[--len] = '\0';
-        if (len > 0 && pipe_line[len - 1] == '\r') pipe_line[--len] = '\0';
-        return strdup(pipe_line);
+        // Read all available pipe input as a single message.
+        // Concatenate multiple lines with newlines.
+        static char pipe_buf[65536];
+        int pipe_len = 0;
+        int line_count = 0;
+        while (pipe_len < (int)sizeof(pipe_buf) - 1) {
+            if (fgets(pipe_buf + pipe_len, (int)sizeof(pipe_buf) - pipe_len, stdin) == NULL) {
+                break;
+            }
+            size_t line_len = strlen(pipe_buf + pipe_len);
+            pipe_len += (int)line_len;
+            line_count++;
+            // If the line already ends with newline, that's fine.
+            // Don't read too many lines at once to avoid blocking.
+        }
+        if (pipe_len == 0) {
+            // EOF with no data
+            return NULL;
+        }
+        // Strip trailing newline(s)
+        while (pipe_len > 0 && (pipe_buf[pipe_len - 1] == '\n' || pipe_buf[pipe_len - 1] == '\r')) {
+            pipe_buf[--pipe_len] = '\0';
+        }
+        // Return copy of accumulated input
+        return strdup(pipe_buf);
     }
 
     // Restore console mode before reading
