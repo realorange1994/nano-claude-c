@@ -277,20 +277,33 @@ char *repl_read_line_interruptible(REPL *repl) {
         }
     }
 #else
-    // Linux: simply use fgets with signal-based cancellation
-    static char line[4096];
-    if (repl_is_cancelled(repl)) return NULL;
+    // Linux/POSIX: read all available pipe input as a single message.
+    static char line[65536];
+    int len = 0;
 
-    if (fgets(line, sizeof(line), stdin) == NULL) {
-        return NULL;  // EOF
+    if (isatty(STDIN_FILENO)) {
+        // Interactive terminal: read one line
+        if (repl_is_cancelled(repl)) return NULL;
+        if (fgets(line, sizeof(line), stdin) == NULL) {
+            return NULL;  // EOF
+        }
+        if (repl_is_cancelled(repl)) return NULL;
+        len = (int)strlen(line);
+    } else {
+        // Pipe: read all available input as a single message
+        while (len < (int)sizeof(line) - 1) {
+            if (fgets(line + len, (int)sizeof(line) - len, stdin) == NULL) {
+                break;
+            }
+            len += (int)strlen(line + len);
+        }
+        if (len == 0) return NULL;  // EOF with no data
     }
 
-    if (repl_is_cancelled(repl)) return NULL;
-
-    // Strip newline
-    size_t len = strlen(line);
-    if (len > 0 && line[len - 1] == '\n') line[--len] = '\0';
-    if (len > 0 && line[len - 1] == '\r') line[--len] = '\0';
+    // Strip newline(s)
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+        line[--len] = '\0';
+    }
     return strdup(line);
 #endif
 }
