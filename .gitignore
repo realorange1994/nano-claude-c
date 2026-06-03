@@ -4,6 +4,7 @@
 *.bak
 obj/
 deps/cJSON.o
+deps/cJSON/
 deps/curl/
 deps/openssl-3.3.2/
 deps/openssl-3.3.2.tar.gz
@@ -12,3 +13,11 @@ deps/cjson-*/
 deps/.git_nested
 deps/curl/.git_nested
 deps/cJSON/.git_nested
+debug_request.json
+build_err.txt
+build_extra.bat
+build_test.bat
+test_*.c
+test_*.txt
+temp_test_file.txt
+quicksort.py
