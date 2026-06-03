@@ -13,6 +13,32 @@
 #pragma comment(lib, "winhttp.lib")
 #endif
 
+// Compact JSON in-place: remove newlines, collapse whitespace
+static void compact_json_inplace(char *s) {
+    if (!s) return;
+    char *dst = s;
+    int in_string = 0;
+    int escaped = 0;
+    int prev_space = 1;  // skip leading spaces
+    for (const char *p = s; *p; p++) {
+        if (escaped) { escaped = 0; *dst++ = *p; prev_space = 0; continue; }
+        if (in_string) {
+            if (*p == '\\') { escaped = 1; *dst++ = *p; prev_space = 0; continue; }
+            if (*p == '"') { in_string = 0; *dst++ = *p; prev_space = 0; continue; }
+            *dst++ = *p; prev_space = 0; continue;
+        }
+        if (*p == '"') { in_string = 1; *dst++ = *p; prev_space = 0; continue; }
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+            if (!prev_space) { *dst++ = ' '; prev_space = 1; }
+            continue;
+        }
+        *dst++ = *p; prev_space = 0;
+    }
+    // Remove trailing space
+    if (dst > s && dst[-1] == ' ') dst--;
+    *dst = '\0';
+}
+
 void http_init(void) {
 #ifndef _WIN32
     curl_global_init(CURL_GLOBAL_ALL);
@@ -305,10 +331,12 @@ HttpResponse http_post_ex(const char *url, const char *headers_str, const char *
     WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
 
     if (status_code != 200) {
-        if (buffer_c_str(&buf) && buffer_c_str(&buf)[0])
+        if (buffer_c_str(&buf) && buffer_c_str(&buf)[0]) {
             strncpy(result.error, buffer_c_str(&buf), sizeof(result.error) - 1);
-        else
+            compact_json_inplace(result.error);
+        } else {
             snprintf(result.error, sizeof(result.error), "HTTP %d", status_code);
+        }
         buffer_free(&buf);
         return result;
     }
@@ -367,10 +395,12 @@ HttpResponse http_post_ex(const char *url, const char *headers_str, const char *
         return result;
     }
     if (http_code != 200) {
-        if (resp.data && resp.data[0])
+        if (resp.data && resp.data[0]) {
             strncpy(result.error, resp.data, sizeof(result.error) - 1);
-        else
+            compact_json_inplace(result.error);
+        } else {
             snprintf(result.error, sizeof(result.error), "HTTP %ld", http_code);
+        }
         mb_free(&resp);
         return result;
     }
@@ -493,10 +523,12 @@ bool http_post_stream_ex(const char *url, const char *headers_str, const char *b
             echunk[ebytes_read] = '\0';
             buffer_append(&buf, echunk, ebytes_read);
         }
-        if (buffer_c_str(&buf) && buffer_c_str(&buf)[0])
+        if (buffer_c_str(&buf) && buffer_c_str(&buf)[0]) {
             strncpy(result->error, buffer_c_str(&buf), sizeof(result->error) - 1);
-        else
+            compact_json_inplace(result->error);
+        } else {
             snprintf(result->error, sizeof(result->error), "HTTP %lu", status_code);
+        }
         buffer_free(&buf);
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
         return false;
@@ -615,7 +647,12 @@ bool http_post_stream_ex(const char *url, const char *headers_str, const char *b
         return false;
     }
     if (http_code != 200) {
-        snprintf(result->error, sizeof(result->error), "HTTP %ld", http_code);
+        if (sse.buf_len > 0) {
+            strncpy(result->error, sse.buf, sizeof(result->error) - 1);
+            compact_json_inplace(result->error);
+        } else {
+            snprintf(result->error, sizeof(result->error), "HTTP %ld", http_code);
+        }
         sse_ctx_free(&sse);
         return false;
     }

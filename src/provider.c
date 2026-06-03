@@ -452,6 +452,11 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
         error_copy[sizeof(error_copy) - 1] = '\0';
         free(resp.body);
 
+        // Always record the error before deciding to break or retry
+        p->retry_state.consecutive_errors = attempt + 1;
+        p->retry_state.last_error_status = resp.http_status;
+        strncpy(p->retry_state.last_error, error_copy, sizeof(p->retry_state.last_error) - 1);
+
         DEBUG_LOG("[retry][sync] attempt %d/%d failed: HTTP %d, decision=%d: %s\n",
                   attempt + 1, max_retries + 1, resp.http_status, r.decision, error_copy);
 
@@ -469,10 +474,6 @@ char *provider_chat_sync(Provider *p, cJSON *messages, int max_tokens_override, 
                                                : retry_backoff_ms(attempt);
         DEBUG_LOG("[retry][sync] waiting %dms before retry\n", delay_ms);
         retry_sleep_ms(delay_ms);
-
-        p->retry_state.consecutive_errors = attempt + 1;
-        p->retry_state.last_error_status = resp.http_status;
-        strncpy(p->retry_state.last_error, error_copy, sizeof(p->retry_state.last_error) - 1);
     }
 
     free(json_body);
@@ -871,7 +872,9 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
         StreamChunk chunk = {0};
         chunk.type = CHUNK_DONE;
         callback(&chunk, userdata);
-        retry_state_stream_success(&p->retry_state);
+        if (content) {
+            retry_state_stream_success(&p->retry_state);
+        }
         return content != NULL;
     }
 
@@ -980,6 +983,9 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
                 DEBUG_LOG("[retry][stream] attempt %d/%d failed: HTTP %d: %s\n",
                           attempt + 1, max_retries + 1, stream_result.http_status, stream_result.error);
                 RetryResult r = classify_error(stream_result.http_status, stream_result.error);
+                p->retry_state.consecutive_errors = attempt + 1;
+                p->retry_state.last_error_status = stream_result.http_status;
+                strncpy(p->retry_state.last_error, stream_result.error, sizeof(p->retry_state.last_error) - 1);
                 if (r.decision == RETRY_NON_RETRYABLE || r.decision == RETRY_CONTEXT_OVERFLOW) {
                     DEBUG_LOG("[retry][stream] non-retryable, stopping\n");
                     break;
@@ -990,9 +996,6 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
                     DEBUG_LOG("[retry][stream] waiting %dms\n", delay_ms);
                     retry_sleep_ms(delay_ms);
                 }
-                p->retry_state.consecutive_errors = attempt + 1;
-                p->retry_state.last_error_status = stream_result.http_status;
-                strncpy(p->retry_state.last_error, stream_result.error, sizeof(p->retry_state.last_error) - 1);
             } else {
                 retry_state_on_success(&p->retry_state);
                 retry_state_stream_success(&p->retry_state);
@@ -1020,6 +1023,9 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
                 DEBUG_LOG("[retry][stream] attempt %d/%d failed: HTTP %d: %s\n",
                           attempt + 1, max_retries + 1, stream_result.http_status, stream_result.error);
                 RetryResult r = classify_error(stream_result.http_status, stream_result.error);
+                p->retry_state.consecutive_errors = attempt + 1;
+                p->retry_state.last_error_status = stream_result.http_status;
+                strncpy(p->retry_state.last_error, stream_result.error, sizeof(p->retry_state.last_error) - 1);
                 if (r.decision == RETRY_NON_RETRYABLE || r.decision == RETRY_CONTEXT_OVERFLOW) {
                     DEBUG_LOG("[retry][stream] non-retryable, stopping\n");
                     break;
@@ -1030,9 +1036,6 @@ bool provider_chat_stream(Provider *p, cJSON *messages, ChunkCallback callback, 
                     DEBUG_LOG("[retry][stream] waiting %dms\n", delay_ms);
                     retry_sleep_ms(delay_ms);
                 }
-                p->retry_state.consecutive_errors = attempt + 1;
-                p->retry_state.last_error_status = stream_result.http_status;
-                strncpy(p->retry_state.last_error, stream_result.error, sizeof(p->retry_state.last_error) - 1);
             } else {
                 retry_state_on_success(&p->retry_state);
                 retry_state_stream_success(&p->retry_state);

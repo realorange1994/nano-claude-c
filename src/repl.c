@@ -658,14 +658,17 @@ int repl_run(REPL *repl) {
             }
 
             if (!success) {
-                int http_status;
-                char error_msg[512];
+                int http_status = 0;
+                char error_msg[512] = {0};
                 provider_get_last_error(repl->provider, &http_status, error_msg, sizeof(error_msg));
                 if (http_status > 0) {
                     printf("Error: API request failed (HTTP %d): %s\n", http_status, error_msg);
+                } else if (error_msg[0]) {
+                    printf("Error: %s\n", error_msg);
                 } else {
-                    printf("Error: %s\n", error_msg[0] ? error_msg : "Failed to get response");
+                    printf("Error: Failed to get response\n");
                 }
+                fflush(stdout);
                 break;
             }
 
